@@ -1,8 +1,9 @@
-# Marine Heatwaves (MHW). 
+# Marine Heatwaves (MHW)
 
 * Original reference by Jacox 2020 
 
   - Jocox (2020): https://www.nature.com/articles/s41586-020-2534-z
+    Jacox, Michael G., et al. "Thermal displacement by marine heatwaves." Nature 584.7819 (2020): 82-86.
 
   - Note that in original paper by Jacox 2020: "For each grid cell we calculated time series of SST anomalies relative to 
     the 1982–2011 climatology and classified MHWs as periods with SST anomalies above a seasonally varying 90th-percentile 
@@ -12,3 +13,13 @@
   - original code ref (in Matlab): https://github.com/mjacox/Thermal_Displacement/
 
   - code in R, and data use NOAA OISST v2.1: https://www.ncei.noaa.gov/data/sea-surface-temperature-optimum-interpolation/ 
+
+
+* Usage
+
+  - Install R, Rstudio from their official website first
+
+  - How to preview .html (generated from Rmarkdown) in this site? 
+
+    > In chrome (or other browser) URL input https://htmlpreview.github.io/? + HTML URL in this repository. 
+    > For example: https://github.com/cywhale/marineheatwave/blob/main/R/01_OISST_data.html
