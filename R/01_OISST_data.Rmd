@@ -1,0 +1,133 @@
+---
+title: "OISST Data"
+author: "cywhale"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    self-contained: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(tidy = FALSE)
+options(htmltools.dir.version = FALSE)
+options(useFancyQuotes = FALSE)
+```
+
+Marine Heatwaves (MHW). Original reference: https://www.nature.com/articles/s41586-020-2534-z
+
+ - citation: Jacox, Michael G., et al. "Thermal displacement by marine heatwaves." Nature 584.7819 (2020): 82-86.
+
+ - Original code ref (in Matlab): https://github.com/mjacox/Thermal_Displacement/
+
+``` {r required_package}
+if (!require("curl")) install.packages("curl"); library(curl)
+if (!require("magrittr")) install.packages("magrittr"); library(magrittr)
+if (!require("data.table")) install.packages("data.table"); library(data.table)
+
+```
+First we download dataset from NOAA OISST v2.1. The dataset metadata: https://www.ncei.noaa.gov/products/optimum-interpolation-sst 
+
+ - dataset citation: Huang, B., C. Liu, V. Banzon, E. Freeman, G. Graham, B. Hankins, T. Smith, and H.-M. Zhang, 2020: Improvements of the Daily Optimum Interpolation Sea Surface Temperature (DOISST) Version 2.1, Journal of Climate, 34, 2923-2939. doi: 10.1175/JCLI-D-20-0166.1
+ - Note that 19880101 in filename means date of this data file is 1988/01/01
+ - "nc" file extension means NetCDF
+
+
+```{r testfile_of_oisst}
+baseurl <- "https://www.ncei.noaa.gov/data/sea-surface-temperature-optimum-interpolation/v2.1/access/avhrr"
+
+# difine a file download save path
+monthi<- "198801"
+datei <- paste0(monthi, "01")
+fileprex <- "oisst-avhrr-v02r01"
+filename <- paste(fileprex, datei, "nc", sep=".")
+oisstfile <- paste(baseurl, monthi, filename, sep="/")  
+print(paste0("Download from: ", oisstfile))
+# "https://www.ncei.noaa.gov/data/sea-surface-temperature-optimum-interpolation/v2.1/access/avhrr/198801/oisst-avhrr-v02r01.19880101.nc"
+
+dest  <- "../data_src/oisst/daily/"
+fileo <- paste0(dest, filename)
+print(paste0("File output: ", fileo))
+
+if (!file.exists(fileo)) {
+  tryCatch({
+    curl::curl_download(oisstfile, destfile = fileo)
+  }, error = function(e) paste0(datei, ": ", e))
+}  
+```
+
+Use R package "stars" to read .nc file (BTW, we used "ncdf4" package in the past)
+
+ - ref: https://r-spatial.github.io/stars/reference/read_stars.html
+ 
+``` {r required_stars, warning=FALSE}
+if (!require("stars")) install.packages("stars"); library(stars)
+if (!require("abind")) install.packages("abind"); library(abind)
+if (!require("dplyr")) install.packages("dplyr"); library(dplyr)
+
+sts <- read_stars(fileo)
+str(sts)
+```
+
+``` {r plot_stars_sst, message=FALSE, results='hide'}
+if (!require("ggplot2")) install.packages("ggplot2"); library(ggplot2)
+if (!require("ggExtra")) install.packages("ggExtra"); library(ggExtra)
+#if (!require("viridis")) install.packages("viridis"); library(viridis)
+
+var <- "sst" #use abind::adrop to drop undesired dimentions except sst
+z <- sts %>% dplyr::select(var) %>% adrop 
+df <- as.data.frame(z)
+#class(df[,var])
+#[1] "units"
+df[,var] <- unclass(df[,var])
+#class(df[,var])
+#[1] "numeric"
+
+# plot settings
+# range(na.omit(df[,var]))
+# -1.80 31.23
+minz <- -2; maxz <- 32.5
+legend_direction <- "horizontal"
+# a custom color palette used in SST
+jet.colors <-
+  colorRampPalette(c("#00007F", "blue", "#007FFF", "cyan",
+                     "#7FFF7F", "yellow", "#FF7F00", "red", "#7F0000"))
+
+gx <- ggplot() +  
+    geom_tile(data=df, aes_string(x="x", y="y", fill=var), alpha=0.8) + 
+    xlab(NULL) + ylab(NULL)
+# data range and color scale setup
+gx <- gx + 
+    coord_sf(xlim=c(0, 360), ylim=c(-90, 90)) +
+    scale_fill_gradientn(toupper(var), colors = jet.colors(16), limits=c(minz, maxz),
+                       breaks=seq(100*minz, 100*maxz, by = as.integer((maxz-minz)*100/3))/100)
+
+# plot panel setup
+gx <- gx + 
+    ggExtra::removeGrid(x=TRUE, y=TRUE) +
+    theme(
+      panel.background = element_blank(), 
+      panel.border = element_rect(colour = "black", fill=NA, size=0.75),
+      panel.grid.major.x = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor = element_blank(),
+      strip.background = element_blank(),
+      strip.text.y = element_text(angle = 0),
+      axis.text.x  = element_text(family = "sans"),
+      axis.title.x = element_text(family = "sans"),
+      axis.title.y = element_text(family = "sans"),
+      axis.text.y = element_text(family = "sans"),
+      legend.key = element_blank(),
+      legend.key.size = unit(0.8,"line"),
+      legend.box.background = element_blank(),
+      legend.title = element_text(size=10),
+      legend.text =  element_text(family = "sans", size=7),
+      legend.background = element_rect(fill = "transparent", colour = "transparent"),
+      legend.direction=legend_direction,
+      legend.key.height = unit(fifelse(legend_direction=="horizontal",0.2,2),'cm'),
+      legend.position = "bottom"
+    )
+gx
+
+```
