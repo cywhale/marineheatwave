@@ -17,9 +17,11 @@
 
 * Usage
 
-  - Install R, Rstudio from their official website first
+  - Install R, (and Rstudio recommended) from their official website first
 
-  - How to preview .html (generated from Rmarkdown) in this site? 
+  - Find souce codes in R/, \*.Rmd are for Rmarkdown files with codes enclosed in \``` section \```; \*.html is the results generated from .Rmd
+
+  - To preview .html (generated from Rmarkdown) in this site:
 
     > In chrome (or other browser) URL input https://htmlpreview.github.io/? + HTML URL in this repository. 
-    > For example: https://github.com/cywhale/marineheatwave/blob/main/R/01_OISST_data.html
+    > For example: https://htmlpreview.github.io/?https://github.com/cywhale/marineheatwave/blob/main/R/01_OISST_data.html
