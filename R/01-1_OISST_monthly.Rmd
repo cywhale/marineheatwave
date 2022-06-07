@@ -1,0 +1,261 @@
+---
+title: "OISST Monthly Average"
+author: "cywhale"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    self-contained: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(tidy = FALSE)
+options(htmltools.dir.version = FALSE)
+options(useFancyQuotes = FALSE)
+```
+
+Marine Heatwaves (MHW). Continue 01_OISST_data.Rmd, to evaluate monthly average
+
+
+``` {r basic_setting_as_01_OISST, warning=FALSE, message=FALSE, results='hide'}
+if (!require("curl")) install.packages("curl"); library(curl)
+if (!require("magrittr")) install.packages("magrittr"); library(magrittr)
+if (!require("data.table")) install.packages("data.table"); library(data.table)
+if (!require("stars")) install.packages("stars"); library(stars)
+if (!require("abind")) install.packages("abind"); library(abind)
+if (!require("dplyr")) install.packages("dplyr"); library(dplyr)
+
+# Use future.apply package for concurrency
+if (!require("future.apply")) install.packages("future.apply"); library(future.apply)
+plan(multisession)
+options(future.globals.maxSize= 1048576000) #for larger memory allocation
+
+baseurl <- "https://www.ncei.noaa.gov/data/sea-surface-temperature-optimum-interpolation/v2.1/access/avhrr"
+fileprex <- "oisst-avhrr-v02r01"
+dest  <- "../data_src/oisst/daily/"
+#monthi<- "198801"
+#datei <- paste0(monthi, "01")
+#filename <- paste(fileprex, datei, "nc", sep=".")
+#oisstfile <- paste(baseurl, monthi, filename, sep="/")  
+
+yrng <- seq(2022,2022) #1982, 2022 #example here only evaluate duration at 2022 #current dataset includes 198109 - 202206 (update 202206)
+curryr <- year(Sys.Date())
+currmo <- month(Sys.Date())
+startm <- 5 #1 #normally we evaluate 1-12 month. But here we only test 1 month: May, 2022
+
+# return days of month
+mdayx <- function (yr, month, mday=c(31,28,31,30,31,30,31,31,30,31,30,31)) {
+  return (fifelse(yr %% 4 != 0 | month != 2, mday[month], 29))
+}
+
+# Note that there are four variables: anom (anomaly), error, ice (sea ice), and sst (SST) in an OISST daily NetCDF(.nc) file
+# Sea ice in this dataset, icedayx means sea ice presence, if 1 means present; 0: absence
+icedayx <- function(x) {
+  sum(fifelse(is.na(x) | x<=0, 0L, 1L))
+}
+# icmaskx means if in a month the days of sea ice presence >= days of sea ice absence, then it means this area (0.25-degree grid) of sea is masked by sea ice
+icemaskx <- function(x, days) {
+  fifelse(x>=(days-x), 1L, 0L)
+}
+
+#Overwrite downloaded nc files and variables (No need to overwrite if files already downloaded)
+Overwrite_nc  <- FALSE
+Overwrite_var <- FALSE
+
+```
+
+The metadata of NOAA OISST v2.1 datasets: "Three other maps at the same 1/4° spatial resolution complement the daily OISST:" (https://www.ncei.noaa.gov/products/optimum-interpolation-sst)
+
+ - Anomalies (i.e., the daily OISST minus a 30-year climatological mean) represent departures from "normal" or average conditions. Computation of several climate indices, such as the El Niño index, utilize SST anomalies.
+ - (Not used here) The error field provides a measure of confidence or quality, allowing users to exclude (using a threshold) or to minimize (using weights) the impact of daily OISST values with greater interpolation errors.
+ - The seven-day median of daily sea ice concentrations serves as the basis for proxy SSTs in the marginal ice zone, where observations are lacking. The proxy SST allows interpolation of temperatures from the open ocean to the seasonal sea ice margin.
+
+
+```{r parallel_curl_download, warning=FALSE}
+for (i in yrng) {
+    mmx <- fifelse(i==curryr, currmo-1L, 12L)
+    for (j in startm:mmx) {
+      monj <- fifelse(j<10, paste0("0",j), paste0(j))
+      days <- mdayx(i, j)
+      print(paste0("Now in Year-month: ", i," - ", monj, " and have days: ", days))
+      
+      flist <- future_lapply(1:days, function(k) {
+        dayk <- fifelse(k<10, paste0("0",k), paste0(k))
+        datei <- paste0(i, monj, dayk)
+        filei <- paste(fileprex, datei, "nc", sep=".")
+        fileo <- paste0(dest, filei)
+        if (Overwrite_nc | !file.exists(fileo)) {
+          tryCatch({
+            curl_download(paste(baseurl, substr(datei, 1, 6), filei, sep="/"), destfile = fileo)
+          }, error = function(e) paste0(datei, ": ", e))
+        } 
+        return(fileo)
+      }) 
+      
+      while(!any(resolved(flist))) {
+        print("Wait for resolved...")
+        Sys.sleep(0.1)
+      }
+      fs <- unlist(flist, use.names = FALSE)
+      chkfs <- all(file.exists(fs))
+      if (chkfs) {
+        print(paste0("All resolved check: ", as.character(chkfs)))
+      } else {
+        chkt <- which(!file.exists(fs))
+        print(paste0("All resolved BUT NOT exist: ", paste(chkt, collapse=",")))
+        fs <- fs[-chkt]
+      }
+      sts <- read_stars(fs)
+      
+      future_lapply(c("anom", "ice", "sst"), function(var) {
+        filet <- paste0("../data_src/oisst/monthly_", var, "/", i, monj, "_", var, ".nc")
+        if (Overwrite_var | !file.exists(filet)) { 
+          z <- sts %>% select(var) %>% adrop %>% aggregate(by=paste0(days, " days"), FUN=mean, na.rm=TRUE)
+          write_stars(z, filet)
+          if (var=="ice") {
+            #vart <- "icemask"
+            z <- sts %>% select(var) %>% adrop %>% aggregate(by="months",FUN=icedayx) %>%
+                 aggregate(by="months",FUN=icemaskx, days=days)
+            filet <- paste0("../data_src/oisst/monthly_icemask", "/", i, monj, "_icemask.nc")
+            write_stars(z, filet)
+          }
+        }    
+      })
+    }
+  #We can compress files if would not be used any more later  
+  #if (i!=curryr) try(system(paste0("zip -j -m -9 ", dest, "zip/", i, ".zip ", dest, fileprex, ".", i, "*.nc")))
+}
+```
+
+According to 01_OISST_data.Rmd plotting, we can customize a plot functions
+ 
+
+``` {r plot_stars_func, warning=FALSE, message=FALSE, results='hide'}
+if (!require("ggplot2")) install.packages("ggplot2"); library(ggplot2)
+if (!require("ggExtra")) install.packages("ggExtra"); library(ggExtra)
+if (!require("viridis")) install.packages("viridis"); library(viridis)
+
+gplotx <- function(z, var="sst", returnx=FALSE, minz=NA_real_, maxz=NA_real_, no_coord=FALSE, fillopts="D", xlab=NULL, ylab=NULL, maxlim=360, legend_pos="bottom", legend_label=var, legend_direction="horizontal") {
+  df <- as.data.frame(z)
+  if (is.na(var) | var=="") { var = colnames(df)[3] }
+  zcol <- chmatch(var, colnames(df))
+  if (!length(zcol) | is.na(zcol)) { #ensym(var)
+    print("Warning: change z column name")
+    colnames(df)[3] <- var
+    zcol <- grep(var, colnames(df))
+  }  
+  
+  df[,zcol] <- unclass(df[,zcol])
+  if (any(is.na(c(minz, maxz)))) {
+    rng <- range(na.omit(df[,zcol]))
+    if (is.na(minz)) {
+      minz <- floor(rng[1]) - 0.5
+    }
+    if (is.na(maxz)) {
+      maxz <- floor(rng[2]) + 1.5
+    }
+  }
+
+  if (!is.na(maxlim) & maxlim!=360) {
+    df[,"x"] <- fifelse(df[,"x"]>180, df[,"x"]-360, df[,"x"])
+  }
+  
+  if ("topright" %in% legend_pos) {
+    lt <- c(0.9,0.75)
+  } else if ("bottomright" %in% legend_pos) {
+    lt <- c(0.9,0.35)
+  } else if ("topleft" %in% legend_pos) {
+    lt <- c(0.1,0.75)
+  } else if ("bottomleft" %in% legend_pos) {
+    lt <- c(0.1,0.35)
+  } else {
+    lt <- legend_pos
+  }
+
+  gx <- ggplot() +  
+    geom_tile(data=df, aes_string(x="x", y="y", fill=var), alpha=0.8) + 
+    xlab(xlab) + ylab(ylab) 
+  
+  if (!is.na(maxlim) & maxlim!=360) {
+    if (no_coord) {
+      gx <- gx + xlim(c(-180, 180)) + ylim(c(-90, 90))
+    } else {
+      gx <- gx + coord_sf(xlim=c(-180, 180), ylim=c(-90, 90))
+    }
+  } else {
+    if (no_coord) {
+      gx <- gx + xlim(c(0, 360)) + ylim(c(-90, 90))
+    } else {
+      gx <- gx + coord_sf(xlim=c(0, 360), ylim=c(-90, 90))
+    }
+  } 
+  if (!is.na(fillopts) & fillopts %in% LETTERS[1:5]) {
+    if (any(is.na(c(minz, maxz)))) {
+      gx <- gx + scale_fill_viridis(legend_label, option=fillopts) 
+    } else {
+      gx <- gx + scale_fill_viridis(legend_label, limits=c(minz, maxz),option=fillopts,
+                                    breaks=seq(100*minz, 100*maxz, by = as.integer((maxz-minz)*100/3))/100)
+    }
+  } else {
+    jet.colors <-
+      colorRampPalette(c("#00007F", "blue", "#007FFF", "cyan",
+                         "#7FFF7F", "yellow", "#FF7F00", "red", "#7F0000"))
+    if (any(is.na(c(minz, maxz)))) {
+      gx <- gx + scale_fill_gradientn(legend_label, colors = jet.colors(16))
+    } else {
+      gx <- gx + scale_fill_gradientn(legend_label, colors = jet.colors(16), limits=c(minz, maxz),
+                                      breaks=seq(100*minz, 100*maxz, by = as.integer((maxz-minz)*100/3))/100)
+    }
+  }
+  
+  gx <- gx +
+    ggExtra::removeGrid(x=TRUE, y=TRUE) +
+    theme(
+      panel.background = element_blank(), 
+      panel.border = element_rect(colour = "black", fill=NA, size=0.75),
+      panel.grid.major.x = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor = element_blank(),
+      strip.background = element_blank(),
+      strip.text.y = element_text(angle = 0),
+      axis.text.x  = element_text(family = "sans"),
+      axis.title.x = element_text(family = "sans"),
+      axis.title.y = element_text(family = "sans"),
+      axis.text.y = element_text(family = "sans"),
+      legend.key = element_blank(),
+      legend.key.size = unit(0.8,"line"),
+      legend.box.background = element_blank(),
+      legend.title = element_text(size=10),
+      legend.text =  element_text(family = "sans", size=7),
+      legend.background = element_rect(fill = "transparent", colour = "transparent"),
+      legend.direction=legend_direction,
+      legend.key.height = unit(fifelse(legend_direction=="horizontal",0.2,2),'cm'),
+      legend.position = lt
+    )
+
+  if (returnx) {return(gx)}
+  gx
+}
+
+plot_stars <- function (file, var="", name=var) {
+  xt <- read_stars(file)
+  
+  if (is.na(var) | var=="") {
+    gplotx(xt, name)
+  } else {
+    z <- xt %>% select(var) %>% adrop 
+    gplotx(z, name)
+  }
+}
+
+```
+
+
+``` {r plot_monthly_var, warning=FALSE, message=FALSE, results='hide'}
+plot_stars("../data_src/oisst/monthly_sst/202205_sst.nc", "", "sst")
+plot_stars("../data_src/oisst/monthly_anom/202205_anom.nc", "", "anom")
+plot_stars("../data_src/oisst/monthly_icemask/202205_icemask.nc", "", "icemask")
+
+
+```
