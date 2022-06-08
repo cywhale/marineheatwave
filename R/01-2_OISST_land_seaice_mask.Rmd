@@ -48,13 +48,13 @@ if (!file.exists(landmask_file)) {
 } 
 
 lsm <- read_stars(landmask_file) #0 = water; 1 = land #downloaded from 
-dt <- as.data.table(lsm)
-dt[, time:=NULL] 
-setnames(dt, 3, "landmask")
-dt[, seamask:= as.integer(!landmask)] #Note: seamask 0 is land
+dt0 <- as.data.table(lsm)
+dt0[, time:=NULL] 
+setnames(dt0, 3, "landmask")
+dt0[, seamask:= as.integer(!landmask)] #Note: seamask 0 is land
 
 ggplot() +  
-  geom_tile(data=dt, aes(x=x, y=y, fill=factor(seamask))) + 
+  geom_tile(data=dt0, aes(x=x, y=y, fill=factor(seamask))) + 
   scale_fill_viridis_d(direction=-1) +
   coord_sf(xlim=c(-180, 180), ylim=c(-90, 90)) +
   xlab(NULL) + ylab(NULL)
@@ -66,7 +66,7 @@ To evaluate thermal displacement under marine heatwaves, in Jacox et al. (2020):
    - https://www.nature.com/articles/s41586-020-2534-z#Sec2
 
 
-That's why here we need to mask land, seaice, and some inlad seas.
+That's why here we need to mask land, seaice, and some inland seas.
 
 
 ```{r use_monthly_sea_icemask, warning=FALSE, message=FALSE, results='hide'}
@@ -120,7 +120,7 @@ if (!Recalculate) {
 
 icemask <- as.data.table(stx)
 icemask[, x:=fifelse(x>180, x-360, x)]
-dt <- merge(dt, icemask, by=c("x", "y"), all=TRUE) ## this icemask is an average value through time
+dt <- merge(dt0, icemask, by=c("x", "y"), all=TRUE) ## this icemask is an average value through time
 dt[is.na(landmask), `:=`(landmask=0, seamask=1)]
 dt[seamask==1, seamask:=NA_integer_] ## reassign seamask according to average icemask
 dt[, remark:=NA_character_]
@@ -134,106 +134,108 @@ dt[seamask==1L, remark:='Permanent sea ice']
 dt[icemask>0 & is.na(seamask), seamask := 2L]
 dt[seamask==2L, remark:='Seasonal sea ice']
 
-dt[,`:=`(lon=fifelse(x<0, x+360, x), lat=y, region=NA_character_)]
+## Here we unify x: (0,360) and lon: (-180, 180)
+setnames(dt, 1:2, c("lon", "lat"))
+dt[,`:=`(x=fifelse(lon<0, lon+360, lon), y=lat, region=NA_character_)]
 
 ## Ice-free areas surrounded by sea ice
-dt[lat < -63.9 & is.na(seamask), `:=`(seamask=3, region='Antarctica')]
-dt[lon>12 & lon<32 & lat>53.5 & lat<=66 & is.na(seamask), `:=`(seamask=3, region='Baltic')]
-dt[lon>9.9 & lon<12 & lat>53 & lat<=60 & is.na(seamask), `:=`(seamask=3, region='Baltic')]
-dt[lon>36 & lon<46 & lat>63 & lat<=67 & is.na(seamask), `:=`(seamask=3, region='White')]
-dt[lon>14 & lon<24 & lat>77 & lat<=81 & is.na(seamask), `:=`(seamask=3, region='Svalbard')]
-dt[lon>50 & lon<190 & lat>60 & lat<=88 & is.na(seamask), `:=`(seamask=3, region='Russia')]
-dt[lon>136 & lon<139 & lat>53 & lat<=54 & is.na(seamask), `:=`(seamask=3, region='Russia')]
-dt[lon>158 & lon<159 & lat>52 & lat<=54 & is.na(seamask), `:=`(seamask=3, region='Russia')]
-dt[lon>160 & lon<163 & lat>57 & lat<=60 & is.na(seamask), `:=`(seamask=3, region='Russia')]
-dt[lon>193 & lon<207.8 & lat>57 & lat<=68 & is.na(seamask), `:=`(seamask=3, region='Alaska')]
-dt[lon>207 & lon<213 & lat>60 & lat<=62 & is.na(seamask), `:=`(seamask=3, region='Alaska')]
-dt[lon>228 & lon<320 & lat>62.5 & lat<=85 & is.na(seamask), `:=`(seamask=3, region='Canada/Greenland')]
-dt[lon>267 & lon<284 & lat>51 & lat<=63 & is.na(seamask), `:=`(seamask=3, region='Canada')]
-dt[lon>333 & lon<341 & lat>70 & lat<=84 & is.na(seamask), `:=`(seamask=3, region='Greenland')]
-dt[lon>338 & lon<345 & lat>64.5 & lat<=68 & is.na(seamask), `:=`(seamask=3, region='Iceland')]
-dt[lon>267 & lon<285 & lat>41 & lat<=50 & is.na(seamask), `:=`(seamask=3, region='Great Lakes')]
-dt[lon>290 & lon<297 & lat>45 & lat<=50 & is.na(seamask), `:=`(seamask=3, region='NW Atlantic')]
-dt[lon>302 & lon<307 & lat>47 & lat<=54 & is.na(seamask), `:=`(seamask=3, region='NW Atlantic')]
+dt[y < -63.9 & is.na(seamask), `:=`(seamask=3, region='Antarctica')]
+dt[x>12 & x<32 & y>53.5 & y<=66 & is.na(seamask), `:=`(seamask=3, region='Baltic')]
+dt[x>9.9 & x<12 & y>53 & y<=60 & is.na(seamask), `:=`(seamask=3, region='Baltic')]
+dt[x>36 & x<46 & y>63 & y<=67 & is.na(seamask), `:=`(seamask=3, region='White')]
+dt[x>14 & x<24 & y>77 & y<=81 & is.na(seamask), `:=`(seamask=3, region='Svalbard')]
+dt[x>50 & x<190 & y>60 & y<=88 & is.na(seamask), `:=`(seamask=3, region='Russia')]
+dt[x>136 & x<139 & y>53 & y<=54 & is.na(seamask), `:=`(seamask=3, region='Russia')]
+dt[x>158 & x<159 & y>52 & y<=54 & is.na(seamask), `:=`(seamask=3, region='Russia')]
+dt[x>160 & x<163 & y>57 & y<=60 & is.na(seamask), `:=`(seamask=3, region='Russia')]
+dt[x>193 & x<207.8 & y>57 & y<=68 & is.na(seamask), `:=`(seamask=3, region='Alaska')]
+dt[x>207 & x<213 & y>60 & y<=62 & is.na(seamask), `:=`(seamask=3, region='Alaska')]
+dt[x>228 & x<320 & y>62.5 & y<=85 & is.na(seamask), `:=`(seamask=3, region='Canada/Greenland')]
+dt[x>267 & x<284 & y>51 & y<=63 & is.na(seamask), `:=`(seamask=3, region='Canada')]
+dt[x>333 & x<341 & y>70 & y<=84 & is.na(seamask), `:=`(seamask=3, region='Greenland')]
+dt[x>338 & x<345 & y>64.5 & y<=68 & is.na(seamask), `:=`(seamask=3, region='Iceland')]
+dt[x>267 & x<285 & y>41 & y<=50 & is.na(seamask), `:=`(seamask=3, region='Great Lakes')]
+dt[x>290 & x<297 & y>45 & y<=50 & is.na(seamask), `:=`(seamask=3, region='NW Atlantic')]
+dt[x>302 & x<307 & y>47 & y<=54 & is.na(seamask), `:=`(seamask=3, region='NW Atlantic')]
 dt[seamask==3, remark:='Ice-surrounded areas'];
 
 ## Caspian Sea
-dt[lon>=46 & lon<=56 & lat>=36 & lat<=48 & is.na(seamask), `:=`(seamask=4, region='Caspian Sea')]
+dt[x>=46 & x<=56 & y>=36 & y<=48 & is.na(seamask), `:=`(seamask=4, region='Caspian Sea')]
 dt[seamask==4, remark:='Caspian Sea']
 
 ## Black Sea
-dt[lon>=26.8 & lon<=42 & lat>=40 & lat<=48 & is.na(seamask), `:=`(seamask=5, region='Black Sea')]
+dt[x>=26.8 & x<=42 & y>=40 & y<=48 & is.na(seamask), `:=`(seamask=5, region='Black Sea')]
 dt[seamask==5, remark:='Black Sea']
 
 ## Mediterranean Sea
-dt[lon<=26.7 & lat>=30 & lat<=46 & is.na(seamask), `:=`(seamask=6, region='Mediterranean Sea')]
-dt[lon>=26 & lon<=37 & lat>=30.5 & lat<=39.5 & is.na(seamask), `:=`(seamask=6, region='Mediterranean Sea')]
-dt[lon>=354 & lat>=33 & lat<=41 & is.na(seamask), `:=`(seamask=6, region='Mediterranean Sea')]
+dt[x<=26.7 & y>=30 & y<=46 & is.na(seamask), `:=`(seamask=6, region='Mediterranean Sea')]
+dt[x>=26 & x<=37 & y>=30.5 & y<=39.5 & is.na(seamask), `:=`(seamask=6, region='Mediterranean Sea')]
+dt[x>=354 & y>=33 & y<=41 & is.na(seamask), `:=`(seamask=6, region='Mediterranean Sea')]
 dt[seamask==6, remark:='Mediterranean Sea']
 
 ## Red Sea
-dt[lon>=32 & lon<=43 & lat>=12.5 & lat<=30 & is.na(seamask), `:=`(seamask=7, region='Red Sea')]
+dt[x>=32 & x<=43 & y>=12.5 & y<=30 & is.na(seamask), `:=`(seamask=7, region='Red Sea')]
 dt[seamask==7, remark:='Red Sea']
 
 ## Persian Gulf
-dt[lon>=46 & lon<56 & lat>=23 & lat<=31 & is.na(seamask), `:=`(seamask=8, region='Persian Gulf')]
+dt[x>=46 & x<56 & y>=23 & y<=31 & is.na(seamask), `:=`(seamask=8, region='Persian Gulf')]
 dt[seamask==8, remark:='Persian Gulf']
 
 ## Northern Arabian Sea
-dt[lon>=45 & lon<75 & lat>=14 & lat<=28 & is.na(seamask), `:=`(seamask=9, region='Northern Arabian Sea')]
+dt[x>=45 & x<75 & y>=14 & y<=28 & is.na(seamask), `:=`(seamask=9, region='Northern Arabian Sea')]
 dt[seamask==9, remark:='Northern Arabian Sea']
 
 ## Northern Bay of Bengal
-dt[lon>=77 & lon<99 & lat>=14 & lat<=25 & is.na(seamask), `:=`(seamask=10, region='Northern Bay of Bengal')]
+dt[x>=77 & x<99 & y>=14 & y<=25 & is.na(seamask), `:=`(seamask=10, region='Northern Bay of Bengal')]
 dt[seamask==10, remark:='Northern Bay of Bengal']
 
 ## Equatorial Indian Ocean
-dt[lon>=37 & lon<99 & lat>= -5 & lat<=15 & is.na(seamask), `:=`(seamask=11, region='Equatorial Indian Ocean')]
-dt[lon>=99 & lon<=100 & lat>= -5 & lat<8 & is.na(seamask), `:=`(seamask=11, region='Equatorial Indian Ocean')]
-dt[lon>100 & lon<=101 & lat>= -5 & lat<6.7 & is.na(seamask), `:=`(seamask=11, region='Equatorial Indian Ocean')]
-dt[lon>101 & lon<=104 & lat>= -5 & lat< -2 & is.na(seamask), `:=`(seamask=11, region='Equatorial Indian Ocean')]
+dt[x>=37 & x<99 & y>= -5 & y<=15 & is.na(seamask), `:=`(seamask=11, region='Equatorial Indian Ocean')]
+dt[x>=99 & x<=100 & y>= -5 & y<8 & is.na(seamask), `:=`(seamask=11, region='Equatorial Indian Ocean')]
+dt[x>100 & x<=101 & y>= -5 & y<6.7 & is.na(seamask), `:=`(seamask=11, region='Equatorial Indian Ocean')]
+dt[x>101 & x<=104 & y>= -5 & y< -2 & is.na(seamask), `:=`(seamask=11, region='Equatorial Indian Ocean')]
 dt[seamask==11, remark:='Equatorial Indian Ocean']
 
 ## South China Sea
-dt[lon>=98 & lon<120 & lat>= -5 & lat<=30 & is.na(seamask), `:=`(seamask=12, region='South China Sea')]
+dt[x>=98 & x<120 & y>= -5 & y<=30 & is.na(seamask), `:=`(seamask=12, region='South China Sea')]
 dt[seamask==12, remark:='South China Sea']
 
 ## Northern Gulf of California
-dt[lon>=244.5 & lon<248 & lat>=29.7 & lat<=32 & is.na(seamask), `:=`(seamask=13, region='Northern Gulf of California')]
-dt[lon>=245.5 & lon<249 & lat>=29.4 & lat<=30 & is.na(seamask), `:=`(seamask=13, region='Northern Gulf of California')]
-dt[lon>=246 & lon<249 & lat>=28.9 & lat<=30 & is.na(seamask), `:=`(seamask=13, region='Northern Gulf of California')]
-dt[lon>=246.5 & lon<252 & lat>=27 & lat<=30 & is.na(seamask), `:=`(seamask=13, region='Northern Gulf of California')]
-dt[lon>=247.8 & lon<252 & lat>=26.4 & lat<=30 & is.na(seamask), `:=`(seamask=13, region='Northern Gulf of California')]
-dt[lon>=248.2 & lon<252 & lat>=25 & lat<=30 & is.na(seamask), `:=`(seamask=13, region='Northern Gulf of California')]
+dt[x>=244.5 & x<248 & y>=29.7 & y<=32 & is.na(seamask), `:=`(seamask=13, region='Northern Gulf of California')]
+dt[x>=245.5 & x<249 & y>=29.4 & y<=30 & is.na(seamask), `:=`(seamask=13, region='Northern Gulf of California')]
+dt[x>=246 & x<249 & y>=28.9 & y<=30 & is.na(seamask), `:=`(seamask=13, region='Northern Gulf of California')]
+dt[x>=246.5 & x<252 & y>=27 & y<=30 & is.na(seamask), `:=`(seamask=13, region='Northern Gulf of California')]
+dt[x>=247.8 & x<252 & y>=26.4 & y<=30 & is.na(seamask), `:=`(seamask=13, region='Northern Gulf of California')]
+dt[x>=248.2 & x<252 & y>=25 & y<=30 & is.na(seamask), `:=`(seamask=13, region='Northern Gulf of California')]
 dt[seamask==13, remark:='Northern Gulf of California']
 
 ## Eastern Tropical Pacific
-dt[lon>=245 & lon<260 & lat>= 0 & lat<=25 & is.na(seamask), `:=`(seamask=14, region='Eastern Tropical Pacific')]
-dt[lon>=255 & lon<262 & lat>= 0 & lat<=20 & is.na(seamask), `:=`(seamask=14, region='Eastern Tropical Pacific')]
-dt[lon>=261 & lon<270 & lat>= 0 & lat<=17 & is.na(seamask), `:=`(seamask=14, region='Eastern Tropical Pacific')]
-dt[lon>=269 & lon<275.7 & lat>= 0 & lat<=14 & is.na(seamask), `:=`(seamask=14, region='Eastern Tropical Pacific')]
-dt[lon>=269 & lon<282.8 & lat>= 0 & lat<=7.4 & is.na(seamask), `:=`(seamask=14, region='Eastern Tropical Pacific')]
-dt[lon>=269 & lon<282 & lat>= 0 & lat<=8.5 & is.na(seamask), `:=`(seamask=14, region='Eastern Tropical Pacific')]
-dt[lon>=275 & lon<277 & lat>=8.4 & lat<=9.5 & is.na(seamask), `:=`(seamask=14, region='Eastern Tropical Pacific')]
-dt[lon>=280 & lon<281.6 & lat>=8.4 & lat<=9 & is.na(seamask), `:=`(seamask=14, region='Eastern Tropical Pacific')]
-dt[lon>=245 & lon<295 & lat>= -30 & lat<= 0 & is.na(seamask), `:=`(seamask=14, region='Eastern Tropical Pacific')]
+dt[x>=245 & x<260 & y>= 0 & y<=25 & is.na(seamask), `:=`(seamask=14, region='Eastern Tropical Pacific')]
+dt[x>=255 & x<262 & y>= 0 & y<=20 & is.na(seamask), `:=`(seamask=14, region='Eastern Tropical Pacific')]
+dt[x>=261 & x<270 & y>= 0 & y<=17 & is.na(seamask), `:=`(seamask=14, region='Eastern Tropical Pacific')]
+dt[x>=269 & x<275.7 & y>= 0 & y<=14 & is.na(seamask), `:=`(seamask=14, region='Eastern Tropical Pacific')]
+dt[x>=269 & x<282.8 & y>= 0 & y<=7.4 & is.na(seamask), `:=`(seamask=14, region='Eastern Tropical Pacific')]
+dt[x>=269 & x<282 & y>= 0 & y<=8.5 & is.na(seamask), `:=`(seamask=14, region='Eastern Tropical Pacific')]
+dt[x>=275 & x<277 & y>=8.4 & y<=9.5 & is.na(seamask), `:=`(seamask=14, region='Eastern Tropical Pacific')]
+dt[x>=280 & x<281.6 & y>=8.4 & y<=9 & is.na(seamask), `:=`(seamask=14, region='Eastern Tropical Pacific')]
+dt[x>=245 & x<295 & y>= -30 & y<= 0 & is.na(seamask), `:=`(seamask=14, region='Eastern Tropical Pacific')]
 dt[seamask==14, remark:='Eastern Tropical Pacific']
 
 ## Northern Gulf of Mexico
-dt[lon>=260 & lon<278.5 & lat>=27 & lat<=31 & is.na(seamask), `:=`(seamask=15, region='Northern Gulf of Mexico')]
+dt[x>=260 & x<278.5 & y>=27 & y<=31 & is.na(seamask), `:=`(seamask=15, region='Northern Gulf of Mexico')]
 dt[seamask==15, remark:='Northern Gulf of Mexico']
 
 ## Western Tropical Atlantic
-dt[lon>=260 & lon<315 & lat>= -10 & lat<=27 & is.na(seamask), `:=`(seamask=16, region='Western Tropical Atlantic')]
+dt[x>=260 & x<315 & y>= -10 & y<=27 & is.na(seamask), `:=`(seamask=16, region='Western Tropical Atlantic')]
 dt[seamask==16, remark:='Western Tropical Atlantic']
 
 ## US East Coast
-dt[lon>=278.5 & lon<315 & lat>=27 & lat<=47 & is.na(seamask), `:=`(seamask=17, region='US East Coast')]
+dt[x>=278.5 & x<315 & y>=27 & y<=47 & is.na(seamask), `:=`(seamask=17, region='US East Coast')]
 dt[seamask==17, remark:='US East Coast']
 
 ## Treat some water bodies as land ## https://github.com/mjacox/Thermal_Displacement/blob/master/oisst_an.m
-dt[lon>=267 & lon<285 & lat>=41 & lat<=50, seamask:=0] ## Great lakes
-dt[lon>=269.5 & lon<270.5 & lat>=30 & lat<=31, seamask:=0] ## Lake Ponchartrain
+dt[x>=267 & x<285 & y>=41 & y<=50, seamask:=0] ## Great lakes
+dt[x>=269.5 & x<270.5 & y>=30 & y<=31, seamask:=0] ## Lake Ponchartrain
 ```
 
 ```{r plot_land_seamask, warning=FALSE, message=FALSE, results='hide'}
@@ -242,7 +244,7 @@ colors[2] <- "#a2d2df" #Change color of permanent sea ice
 colors[3] <- "#99FFFF" #Change color of seasonal sea ice
 colors[4] <- "#dcf3ff" #Change color of ice-surrounded areas'
 ggplot() +  
-  geom_tile(data=dt, aes(x=x, y=y, fill=factor(seamask))) + 
+  geom_tile(data=dt, aes(x=lon, y=lat, fill=factor(seamask))) + 
   #scale_fill_viridis_d() +
   scale_fill_manual(values = colors) +
   #coord_equal() + 
@@ -283,3 +285,36 @@ if (Recalculate) {
 }
 ```
 
+``` {r test_landmask, warning=FALSE, message=FALSE, results='hide'}
+land_mask <- fread("../data_src/mapfiles/sea_icemask_025d.csv")[, .(lon, lat, x, y, landmask)]
+setorder(land_mask, -y, x)
+land_mask[,ry:=rowid(x)]
+yy <- unique(land_mask[,.(y, ry)]) ## check, NOTE that in OISST.nc file, y is from Northest (89.875) to Southest (-89.875)
+
+landm <- dcast(land_mask, x ~ ry, value.var = "landmask")
+xx <- as.numeric(landm[,1]$x)
+landm <- as.matrix(landm[,-1])
+
+## Check x order is identical to OISST file
+xt <- read_stars("../data_src/oisst/monthly_sst/202205_sst.nc") %>% as.data.frame()
+all.equal(xx, xt$x[1:1440]) ## TRUE
+
+initialTrial <- TRUE
+if (initialTrial) { #### Just a test to check landm really masking land, can be ignored ###########
+  x <- read_stars(c("../data_src/oisst/monthly_sst/202204_sst.nc", "../data_src/oisst/monthly_sst/202205_sst.nc"), name="sst")
+  names(x) <- c("Apr", "May")
+  ## Just check if landm mask really on land ####
+  x$Apr[1, which(landm[1,]==1)]
+  x$Apr[1, which(landm[41,]==1)]
+  yt=data.table(y=yy$y[as.integer(names(landm[1,which(landm[1,]==1)]))]) %>% 
+    .[,x:=xx[1]] %>% list(., data.table(y=yy$y[as.integer(names(landm[41,which(landm[41,]==1)]))]) %>% 
+                            .[,x:=xx[41]]) %>% rbindlist(use.names = T)
+  
+  yt[,`:=`(lon=fifelse(x>180, x-360, x), lat=y)]
+  ggplot() +  
+    geom_tile(data=land_mask, aes(x=lon, y=lat, fill=factor(landmask)), alpha=0.8) + 
+    geom_point(data=yt, aes(lon,lat), color="red") + #Red points should always on land (landm == 1)
+    scale_fill_viridis_d() +
+    coord_equal() + xlim(c(-15,15)) + ylim(c(min(yt$y)-5, max(yt$y)+5))
+}  
+```

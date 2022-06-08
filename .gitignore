@@ -32,4 +32,5 @@ node_modules
 .Rproj.user
 .Rprofile
 **/oisst-avhrr-v02r01.202205*.nc
+**/oisst-avhrr-v02r01.202204*.nc
 
