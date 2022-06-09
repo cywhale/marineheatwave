@@ -1,0 +1,526 @@
+---
+title: "Evaluate and detrend OISST anomaly by 30yrs mean"
+author: "cywhale"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    self-contained: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(tidy = FALSE)
+options(htmltools.dir.version = FALSE)
+options(useFancyQuotes = FALSE)
+```
+
+R code modified from https://github.com/mjacox/Thermal_Displacement/blob/master/oisst_an.m
+
+First calculate 1982-2011 SST monthly mean. To evaluate SST anomaly: 
+
+  1. SST.1 = Monthly SST - SST_30yr_mean
+  
+  2. SST.anomaly = SST.1 - Linear trend by monthly series from 1982-202205
+
+  3. Land mask from R/01-2_OISST_land_seaice_mask.Rmd
+
+``` {r 30yrs_climatology, warning=FALSE, message=FALSE, results='hide'}
+if (!require("curl")) install.packages("curl"); library(curl)
+if (!require("magrittr")) install.packages("magrittr"); library(magrittr)
+if (!require("data.table")) install.packages("data.table"); library(data.table)
+if (!require("stars")) install.packages("stars"); library(stars)
+if (!require("abind")) install.packages("abind"); library(abind)
+if (!require("dplyr")) install.packages("dplyr"); library(dplyr)
+if (!require("future.apply")) install.packages("future.apply"); library(future.apply)
+
+if (!require("ggplot2")) install.packages("ggplot2"); library(ggplot2)
+if (!require("ggExtra")) install.packages("ggExtra"); library(ggExtra)
+if (!require("viridis")) install.packages("viridis"); library(viridis)
+if (!require("RColorBrewer")) install.packages("RColorBrewer"); library(RColorBrewer)
+if (!require("gridExtra")) install.packages("gridExtra"); library(gridExtra)
+
+## The same code from R/01-2_OISST_land_seaice_mask.Rmd(and can check that testing figure)
+land_mask <- fread("unzip -p ../data_src/mapfiles/sea_icemask_025d.csv.zip")[, .(lon, lat, x, y, landmask)]
+setorder(land_mask, -y, x)
+land_mask[,ry:=rowid(x)]
+yy <- unique(land_mask[,.(y, ry)]) ## check, NOTE that in OISST.nc file, y is from Northest (89.875) to Southest (-89.875)
+
+landm <- dcast(land_mask, x ~ ry, value.var = "landmask")
+xx <- as.numeric(landm[,1]$x)
+landm <- as.matrix(landm[,-1])
+
+clim_years = seq(1982,2011) #for climatology
+climyrs<- clim_years[length(clim_years)] - clim_years[1] + 1 #30 yrs
+monstr <- c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")
+
+Recalculate_30yrs = FALSE
+
+if (Recalculate_30yrs) {
+  plan(multisession)
+  options(future.globals.maxSize= 1048576000)
+
+  stm <- future_lapply(1:12, function(j) {
+    monj <- fifelse(j<10, paste0("0",j), paste0(j))
+    jstr <- monstr[j]
+    for (i in clim_years) {
+      x <- read_stars(paste0("../data_src/oisst/monthly_sst/", i, monj, "_sst.nc"))
+      names(x)[1] <- jstr 
+      x[[1]][which(landm==1)] <- NA_real_
+      ice <- read_stars(paste0("../data_src/oisst/monthly_icemask/", i, monj, "_icemask.nc"))
+      x[[1]][which(ice[[1]]==1)] <- NA_real_
+      if (i == clim_years[1]) {
+        stmx <- x
+        datex<- as.Date(paste0(i, monj, "01"), format="%Y%m%d")
+      } else {
+        stmx <- c(stmx, x)
+        datex<- c(datex, as.Date(paste0(i, monj, "01"), format="%Y%m%d"))
+      }
+    }
+    names(stmx) <- rep(jstr, length(names(stmx)))
+    stmx <- merge(stmx) %>% st_set_dimensions(3, values = as.POSIXct(datex), names = "time") %>% 
+        aggregate(by=paste0(climyrs, " years"), FUN=mean, na.rm=TRUE)
+    names(stmx)[1] <- jstr
+    stmx <- stmx %>% select(jstr) %>% adrop
+    return (stmx)
+  })
+}
+
+if (Recalculate_30yrs) {
+  # Note that in an earlier version used "GLDASp4 land mask" but current version use "GLDASp5"
+  # The differnt version of land mask cause difference in the definition of land areas, so that sea-mask
+  # and then also cause difference in climatology mean result
+  save(stm, file="../data_src/stats/sst_1982_2011month_climatology_nc.RData")
+} else {
+  load("../data_src/stats/sst_1982_2011month_climatology_nc.RData")
+}
+
+stm
+```
+``` {r plot_stm_func, warning=FALSE, message=FALSE, results='hide'}
+library(grid)
+
+# plot functions the same as R/01-1_OISST_monthly.Rmd (but modify plot and panel margins)
+gplotx <- function(z, var="sst", returnx=FALSE, minz=NA_real_, maxz=NA_real_, no_coord=FALSE, fillopts="D", xlab=NULL, ylab=NULL, maxlim=360, legend_pos="bottom", legend_label=var, legend_direction="horizontal") {
+  df <- as.data.frame(z)
+  if (is.na(var) | var=="") { var = colnames(df)[3] }
+  zcol <- chmatch(var, colnames(df))
+  if (!length(zcol) | is.na(zcol)) { #ensym(var)
+    print("Warning: change z column name")
+    colnames(df)[3] <- var
+    zcol <- grep(var, colnames(df))
+  }  
+  
+  df[,zcol] <- unclass(df[,zcol])
+  if (any(is.na(c(minz, maxz)))) {
+    rng <- range(na.omit(df[,zcol]))
+    if (is.na(minz)) {
+      minz <- floor(rng[1]) - 0.5
+    }
+    if (is.na(maxz)) {
+      maxz <- floor(rng[2]) + 1.5
+    }
+  }
+
+  if (!is.na(maxlim) & maxlim!=360) {
+    df[,"x"] <- fifelse(df[,"x"]>180, df[,"x"]-360, df[,"x"])
+  }
+  
+  if ("topright" %in% legend_pos) {
+    lt <- c(0.9,0.75)
+  } else if ("bottomright" %in% legend_pos) {
+    lt <- c(0.9,0.35)
+  } else if ("topleft" %in% legend_pos) {
+    lt <- c(0.1,0.75)
+  } else if ("bottomleft" %in% legend_pos) {
+    lt <- c(0.1,0.35)
+  } else {
+    lt <- legend_pos
+  }
+
+  gx <- ggplot() +  
+    geom_tile(data=df, aes_string(x="x", y="y", fill=var), alpha=0.8) + 
+    xlab(xlab) + ylab(ylab) 
+  
+  if (!is.na(maxlim) & maxlim!=360) {
+    if (!no_coord) {
+      gx <- gx + coord_sf(xlim=c(-180, 180), ylim=c(-90, 90))
+    }
+    gx <- gx + 
+        scale_x_continuous(limits = c(-180, 180), expand = c(0, 0)) + 
+        scale_y_continuous(limits = c(-90, 90), expand = c(0, 0))
+  } else {
+    if (!no_coord) {
+      gx <- gx + coord_sf(xlim=c(0, 360), ylim=c(-90, 90))
+    }
+    gx <- gx + 
+        scale_x_continuous(limits = c(0, 360), expand = c(0, 0)) + 
+        scale_y_continuous(limits = c(-90, 90), expand = c(0, 0))
+  } 
+  if (!is.na(fillopts) & fillopts %in% LETTERS[1:5]) {
+    if (any(is.na(c(minz, maxz)))) {
+      gx <- gx + scale_fill_viridis(legend_label, option=fillopts) 
+    } else {
+      gx <- gx + scale_fill_viridis(legend_label, limits=c(minz, maxz),option=fillopts,
+                                    breaks=seq(100*minz, 100*maxz, by = as.integer((maxz-minz)*100/3))/100)
+    }
+  } else {
+    jet.colors <-
+      colorRampPalette(c("#00007F", "blue", "#007FFF", "cyan",
+                         "#7FFF7F", "yellow", "#FF7F00", "red", "#7F0000"))
+    if (any(is.na(c(minz, maxz)))) {
+      gx <- gx + scale_fill_gradientn(legend_label, colors = jet.colors(16))
+    } else {
+      gx <- gx + scale_fill_gradientn(legend_label, colors = jet.colors(16), limits=c(minz, maxz),
+                                      breaks=seq(100*minz, 100*maxz, by = as.integer((maxz-minz)*100/3))/100)
+    }
+  }
+  
+  gx <- gx +
+    ggExtra::removeGrid(x=TRUE, y=TRUE) +
+    theme(
+      panel.background = element_blank(), 
+      panel.border = element_rect(colour = "black", fill=NA, size=0.75),
+      panel.grid.major.x = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor = element_blank(),
+      plot.margin = unit(c(0,0,0,0), "cm"),
+      panel.spacing = unit(0,"cm"),
+      strip.background = element_blank(),
+      strip.text.y = element_text(angle = 0),
+      axis.text.x  = element_text(family = "sans"),
+      axis.title.x = element_text(family = "sans"),
+      axis.title.y = element_text(family = "sans"),
+      axis.text.y = element_text(family = "sans"),
+      legend.key = element_blank(),
+      legend.key.size = unit(0.8,"line"),
+      legend.box.background = element_blank(),
+      legend.title = element_text(size=10),
+      legend.text =  element_text(family = "sans", size=7),
+      legend.background = element_rect(fill = "transparent", colour = "transparent"),
+      legend.direction=legend_direction,
+      legend.key.height = unit(fifelse(legend_direction=="horizontal",0.2,2),'cm'),
+      legend.position = lt
+    )
+
+  if (returnx) {return(gx)}
+  gx
+}
+
+plotx <- vector("list", length = 12)
+pstrx <- '';
+for (j in 1:12) {
+  plotx[[j]] <- gplotx(stm[[j]], monstr[j], returnx = TRUE, minz = -2.5, maxz = 34.5)
+  pstrx <- paste0(pstrx, "plotx[[", j, "]],") 
+}
+
+lay1 <- rbind(c(1,1,2,2,3,3),
+              c(4,4,5,5,6,6),
+              c(7,7,8,8,9,9),
+              c(10,10,11,11,12,12))
+evplot <- paste0('grid.arrange(', pstrx, ' layout_matrix=lay1)')
+
+```
+
+``` {r plot_grids, warning=FALSE, message=FALSE, results='hide', fig.height=13.0, fig.width=9.8}
+gx <- eval(parse(text=evplot))
+```
+
+To double check if the plots of climatology are right, use existed data that download from NOAA (NetCDF OISST, 0.5d, monthly mean)
+
+  - Metadata: https://psl.noaa.gov/data/gridded/data.noaa.oisst.v2.html
+
+  - https://downloads.psl.noaa.gov/Datasets/noaa.oisst.v2/sst.mnmean.nc (downloaded 202206 and the data is 1981/12 to 2022/05) 
+
+
+``` {r sstmean_from_noaa, warning=FALSE, message=FALSE, results='hide'}
+if (!require("sf")) install.packages("sf"); library(sf)
+if (!require("ncdf4")) install.packages("ncdf4"); library(ncdf4)
+if (!require("rnaturalearth")) {
+  if (!require("devtools")) install.packages("devtools"); library(devtools)
+  devtools::install_github("ropensci/rnaturalearthhires")
+  install.packages("rnaturalearth") 
+  library(rnaturalearth)
+}  
+
+sst_mnfile = "../data_src/stats/sst.mnmean.nc"
+if (!file.exists(sst_mnfile)) {
+  tryCatch({
+    curl::curl_download("https://downloads.psl.noaa.gov/Datasets/noaa.oisst.v2/sst.mnmean.nc", destfile = sst_mnfile)
+  }, error = function(e) paste0(e))
+} 
+
+nx0 <- nc_open(sst_mnfile) 
+print(nx0) ## sst[lon,lat,time]   (Chunking: [360,180,464])
+latn1<- ncvar_get(nx0, "lat") # 89.5 - -89.5
+lngn1<- ncvar_get(nx0, "lon") # 0 - 359.5
+time<- ncvar_get(nx0, "time") # 1981-12.01 - 2020-07-01, we now check every March, August, and December
+date<- time %>%  as.Date(origin="1800-01-01 00:00:0.0") 
+
+maridx <- seq(4, 464, by = 12) #check date[maridx]
+augidx <- seq(9, 464, by = 12)
+decidx <- seq(13, 464, by = 12)
+
+get_sstmx <- function (midx, minz=-2.5, maxz=34.5) {
+  dtx <- as.data.table(ncvar_get(nx0, "sst")[,,midx]) %>% 
+    .[,.(sstm=mean(value, na.rm=TRUE)), by=.(V1,V2)] %>%
+    .[,`:=`(longitude=fifelse(lngn1[V1]>180, lngn1[V1]-360, lngn1[V1]), latitude=latn1[V2])] %>%
+    .[,.(longitude, latitude, sstm)]
+  setnames(dtx, 1:2 , c("x", "y"))
+  
+  gx <- gplotx(dtx, var="sstm", returnx=TRUE, minz=minz, maxz=maxz, no_coord=TRUE, maxlim=180) 
+  gx <- gx +
+  #gx <- ggplot() + 
+  #  geom_tile(data=dt, aes_string(x="longitude", y="latitude", fill="sstm"), alpha=0.8) + 
+  #  scale_fill_viridis(limits=c(minsst, maxsst)) +
+     geom_sf(data = ne_coastline(scale = "large", returnclass = "sf"), color = 'darkgray', size = .3) #+
+  #  coord_sf() + 
+  #  xlim(c(-180, 180)) + ylim(c(-90, 90))
+  
+  return(gx)  
+}
+
+gx3 <- get_sstmx(maridx)
+gx8 <- get_sstmx(augidx)
+gx12 <-get_sstmx(decidx)
+```
+``` {r compare_grids_with_noaa, warning=FALSE, message=FALSE, results='hide'}
+gt3 <- gplotx(as.data.table(stm[[3]]) %>% .[,`:=`(x=fifelse(x>180, x-360, x))], "Mar", returnx=TRUE, minz=-2.5, maxz=34.5, maxlim=180)  
+gt8 <- gplotx(as.data.table(stm[[8]]) %>% .[,`:=`(x=fifelse(x>180, x-360, x))], "Aug", returnx=TRUE, minz=-2.5, maxz=34.5, maxlim=180)  
+gt12 <- gplotx(as.data.table(stm[[12]]) %>% .[,`:=`(x=fifelse(x>180, x-360, x))], "Dec", returnx=TRUE, minz=-2.5, maxz=34.5, maxlim=180)  
+
+lay2 <- rbind(c(1,1,2,2),
+              c(3,3,4,4),
+              c(5,5,6,6))
+```
+
+``` {r plot_compared_grids, warning=FALSE, message=FALSE, results='hide', fig.height=14.7, fig.width=9.8}
+grid.arrange(gx3, gt3, gx8, gt8, gx12, gt12, layout_matrix=lay2)
+
+```
+
+
+``` {r check_prepare_to_calculate_anomaly, warning=FALSE, message=FALSE, results='hide'}
+i <- 2022
+j <- 4
+monj <- fifelse(j<10, paste0("0",j), paste0(j))
+jstr <- monstr[j]
+  
+x <- read_stars(paste0("../data_src/oisst/monthly_sst/", i, monj, "_sst.nc"))
+names(x)[1] <- "anom" 
+#dim(x[[1]]) #1440. 720
+#dim(landm)  #1440, 720
+#dim(ice)    #1440, 720
+x[[1]][which(landm==1)] <- NA_real_
+ice <- read_stars(paste0("../data_src/oisst/monthly_icemask/", i, monj, "_icemask.nc"))
+x[[1]][which(ice[[1]]==1)] <- NA_real_
+
+#xt <- matrix()
+#length(xt) <-1440 * 720
+#dim(xt) <- c(1440, 720)
+## if one of x and stm is NA, then the substraction is NA (so numbers of NA values increases)
+x[[1]] <- x[[1]] - stm[[j]][[1]]
+```
+
+``` {r plot_check_anomaly, warning=FALSE, message=FALSE, results='hide', fig.height=4.9, fig.width=9.8}
+## Just check if plot 2022-04
+gx <- gplotx(x, "anom", minz=-3.5, maxz=3.5, return=TRUE) #This anomaly is substrat long-term mean (30yrs, 1982-2011)
+y <- read_stars("../data_src/oisst/monthly_anom/202204_anom.nc")
+names(y)[1] <- "anom" 
+gy <- gplotx(y, "anom", minz=-3.5, maxz=3.5, return=TRUE)
+
+layt <- rbind(c(1,1,2,2))
+grid.arrange(gx, gy, layout_matrix=layt)
+
+```
+``` {r test_predict_detrend, warning=FALSE}
+yrng <- seq(1982,2022)
+endt <- "2022-05-22"
+trackdate <- seq.Date(as.IDate(endt)-6, as.IDate(endt), by="day")
+curryr <- year(as.IDate(endt))
+currmo <- month(as.IDate(endt))
+
+NEED_RETEST_PRED <- FALSE
+if (NEED_RETEST_PRED) {
+  
+j=4 #just testing, arbitrary select a month
+monj <- fifelse(j<10, paste0("0",j), paste0(j))
+jstr <- monstr[j]
+for (i in yrng) {
+  if (i==curryr & j>(currmo-1)) break
+  z <- read_stars(paste0("../data_src/oisst/monthly_anom_icemask/", i, monj, "_anom.nc"))
+  if (i==yrng[1]) {
+    stdrx <- z
+    datex<- as.Date(paste0(i, monj, "01"), format="%Y%m%d")
+  } else {
+    stdrx <- c(stdrx, z)
+    datex<- c(datex, as.Date(paste0(i, monj, "01"), format="%Y%m%d"))
+  }
+}
+names(stdrx) <- rep(jstr, length(names(stdrx)))
+xt <- merge(stdrx)
+st_set_dimensions(xt, 3, values = as.POSIXct(datex), names = "time")
+seqx <- rbind(c(`377`= as.numeric(xt[[1]][377,41,])), ## arbitrary select a point, check which(!is.na(xt[[1]][,41,]))
+              c(`1112`= as.numeric(xt[[1]][1112,41,])),
+              c(`test`= sort(rnorm(41)) + rnorm(41)))
+colnames(seqx) <- gsub("-", "_", datex)
+rownames(seqx) = c("0377_41", "1222_41", "test")
+yhat <- stats::predict(lm(seqx[3,] ~ seq_along(datex)))
+seqx[1, 28:30] <- NA_real_ #insert NA
+seqx[2, 32:34] <- NA_real_ #insert NA
+predy <- function(x) { return (stats::predict(lm(x ~ seq_along(datex)))) }
+haty <- apply(seqx, MARGIN=1, FUN=function(y){ #predy use predict will auto exclude NA, so that out length is shorter
+    if (all(is.na(y))) return(y)
+    yh <- as.numeric(predy(y)) 
+    y[!is.na(y)] <- yh
+    return(c(as.numeric(y)))
+}) %>% as.data.frame()  
+all.equal(haty$test, as.numeric(yhat)) #TRUE
+
+#test using package pracma detrend function
+if (!require("pracma")) install.packages("pracma"); library(pracma)
+
+ydet <- as.numeric(detrend(seqx[3,], 'linear'))
+all.equal(ydet, as.numeric(seqx[3,]) - as.numeric(yhat)) #TRUE
+
+#test using package pracma detrend function
+if (!require("pracma")) install.packages("pracma"); library(pracma)
+
+plot_pred <- function(x, y, yhat=NULL) {
+  if (is.null(yhat)) {
+    yhat <- stats::predict(lm(y ~ x))
+  } else {
+    yh <- stats::predict(lm(y ~ x))
+    if (!isTRUE(all.equal(as.numeric(yh), yhat))) {
+      print(paste0("Not equal yhat with lm: ", paste(yh, collapse=",")))
+    }
+  }
+  plot(x=x, y=y)
+  abline(lm(y ~ x))
+  points(x=x, y=yhat, col="red", pch=4)
+  points(x=x, y=c(y-yhat), col="green", pch=13)
+}
+
+plot_pred(seq_along(datex), seqx[3,], haty$`test`)
+}
+
+```
+
+``` {r calculate_anomaly, warning=FALSE, message=FALSE, results='hide'}
+Recalculate_anom <- FALSE
+if (Recalculate_anom) {
+  
+for (i in yrng) {
+  mmx <- fifelse(i==curryr, currmo-1L, 12L)
+  for (j in 1:mmx) {
+    monj <- fifelse(j<10, paste0("0",j), paste0(j))
+    jstr <- monstr[j]
+    filet <- paste0("../data_src/oisst/monthly_anom_icemask/", i, monj, "_anom.nc")
+    if (!file.exists(filet)) {
+      #z<- read_stars(paste0("../data_src/oisst/monthly_anom/", i, monj, "_anom.nc")) #Old vers use anom, not sst, so no subtract 30yr mean
+      z <- read_stars(paste0("../data_src/oisst/monthly_sst/", i, monj, "_sst.nc"))
+      
+      names(z)[1] <- "anom" 
+      z[[1]][which(landm==1)] <- NA_real_
+      ice <- read_stars(paste0("../data_src/oisst/monthly_icemask/", i, monj, "_icemask.nc"))
+      z[[1]][which(ice[[1]]==1)] <- NA_real_
+      z[[1]] <- z[[1]] - stm[[j]][[1]] #Old-version without this substraction while using _anom directly
+      write_stars(z, filet)
+    }
+  }
+}
+}
+```
+
+``` {r double_check_anomaly, warning=FALSE, message=FALSE, results='hide', fig.height=4.9, fig.width=9.8}
+## Just check if plot 2022-04
+if (Recalculate_anom) {
+
+gx2 <- gplotx(z, "anom", minz=-3.5, maxz=3.5, return=TRUE) #This anomaly is substrat long-term mean (30yrs, 1982-2011)
+#y <- read_stars("../data_src/oisst/monthly_anom/202204_anom.nc")
+#names(y)[1] <- "anom" 
+#gy <- gplotx(y, "anom", minz=-3.5, maxz=3.5, return=TRUE)
+
+layt <- rbind(c(1,1,2,2))
+grid.arrange(gx2, gy, layout_matrix=layt)
+}
+```
+
+
+```{r timeconsuming_calculate_anomaly, warning=FALSE, message=FALSE, results='hide'}
+## It's hard/slow to detrend each x,y along almost 30yr (30x12) year trend. Must read 1440x720x30x12 at once...
+Recalculate_anom <- FALSE
+yrs <- yrng[length(yrng)] - yrng[1] + 1
+
+if (Recalculate_anom) {
+for (j in 1:12) {
+  monj <- fifelse(j<10, paste0("0",j), paste0(j))
+  jstr <- monstr[j]
+  for (i in yrng) {
+    if (i==curryr & j>(currmo-1)) break
+    
+    z <- read_stars(paste0("../data_src/oisst/monthly_anom_icemask/", i, monj, "_anom.nc"))
+
+    if (i==yrng[1]) {
+      stdrx <- z
+      datex<- as.Date(paste0(i, monj, "01"), format="%Y%m%d")
+    } else {
+      stdrx <- c(stdrx, z)
+      datex<- c(datex, as.Date(paste0(i, monj, "01"), format="%Y%m%d"))
+    }
+  }
+  names(stdrx) <- rep(jstr, length(names(stdrx)))
+  print(paste0("Now in Year-month: ", i," - ", monj, " and have length stdrx: ", length(datex)))
+  
+  predy <- function(x) { return (stats::predict(lm(x ~ seq_along(datex)))) }
+  trd <- merge(stdrx) %>% st_set_dimensions(3, values = as.POSIXct(datex), names = "time") %>% 
+    aggregate(by=paste0(yrs, " years"), FUN = function(y) {
+       if (all(is.na(y))) return(list(as.numeric(y)))
+       y[!is.na(y)] <- as.numeric(predy(y)) #Seems if return value has equal length, the result will be simplified by aggregate if using as.matrix
+       return(list(as.numeric(y))) #Old-version bug: not predy(y), should be y. See previous testing chunk
+    })
+  tk <- array(unlist(trd[[1]]), dim = c(length(datex),1440,720)) #bug fix: NOT each predict have the same length result (if input has NA)
+  
+  print(paste0("Predict ok with dim(tk): ", paste0(dim(tk), collapse=",")))
+  for (k in seq_along(yrng)) {
+    if (yrng[k]==curryr & j>(currmo-1)) break
+    
+    z <- read_stars(paste0("../data_src/oisst/monthly_anom_icemask/", yrng[k], monj, "_anom.nc"))
+    #notna1 <- which(!is.na(z[1][[1]]))
+    #notna2 <- which(!is.na(tk[k,,]))
+    #notna <- intersect(notna1, notna2)
+    #z[[1]][notna] <- z[[1]][notna]- tk[1,,][notna]
+    z[[1]] <- z[[1]]- tk[1,,] #Any of z[[1]] or tk[1,,] NA will cause NA here, it makes sense.
+    names(z)[1] <- "anom"
+    
+    filet <- paste0("../data_src/oisst/monthly_anom_detrend/", yrng[k], monj, "_anom.nc")
+    write_stars(z, filet)
+    print(paste0("Now write Year-month: ", yrng[k], " - ", monj, " ok"))
+  }
+}
+}  
+```
+``` {r check_result_calculate_anomaly, warning=FALSE, message=FALSE, results='hide'}
+yk <- read_stars("../data_src/oisst/monthly_anom/202006_anom.nc")
+zk <- read_stars(paste0("../data_src/oisst/monthly_anom_detrend/", 2020, "06", "_anom.nc"))
+z <- read_stars(paste0("../data_src/oisst/monthly_anom_icemask/", 2020, "06", "_anom.nc"))
+
+names(yk)[1] <- "anom" 
+names(zk)[1] <- "anom"
+names(z)[1] <- "anom"
+print(range(na.omit(as.data.table(yk)$anom))) #-5.911333 10.598333
+print(range(na.omit(as.data.table(zk)$anom))) #-5.39709 16.39870   #old -8.227043 11.727673
+print(range(na.omit(as.data.table(z)$anom)))  #-7.724047 10.483911 #old -8.361936  6.181935
+
+gyk<- gplotx(yk,"anom", minz = -6, maxz = 11.0, returnx=TRUE)
+gz <- gplotx(z, "anom", minz = -6, maxz = 16.5, returnx=TRUE)  
+gzk<- gplotx(zk,"anom", minz = -8, maxz = 11.0, returnx=TRUE)  
+```
+``` {r plot_result_calculate_anomaly, warning=FALSE, message=FALSE, results='hide', fig.height=29.4, fig.width=9.8}
+layt <- rbind(c(1,1),c(2,2),c(3,3))
+grid.arrange(gyk, gzk, gz, layout_matrix=layt)
+#gyk
+#gzk
+#gz
+
+```
