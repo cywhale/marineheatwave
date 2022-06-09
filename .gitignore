@@ -34,3 +34,4 @@ node_modules
 **/oisst-avhrr-v02r01.202205*.nc
 **/oisst-avhrr-v02r01.202204*.nc
 **/monthly_anom_icemask/*04*.nc
+**/sst.mnmean.nc
