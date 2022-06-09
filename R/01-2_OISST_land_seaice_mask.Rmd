@@ -36,7 +36,7 @@ if (!require("stars")) install.packages("stars"); library(stars)
 if (!require("abind")) install.packages("abind"); library(abind)
 if (!require("dplyr")) install.packages("dplyr"); library(dplyr)
 if (!require("ggplot2")) install.packages("ggplot2"); library(ggplot2)
-#if (!require("ggExtra")) install.packages("ggExtra"); library(ggExtra)
+if (!require("ggExtra")) install.packages("ggExtra"); library(ggExtra)
 if (!require("viridis")) install.packages("viridis"); library(viridis)
 if (!require("RColorBrewer")) install.packages("RColorBrewer"); library(RColorBrewer)
 
@@ -56,7 +56,9 @@ dt0[, seamask:= as.integer(!landmask)] #Note: seamask 0 is land
 ggplot() +  
   geom_tile(data=dt0, aes(x=x, y=y, fill=factor(seamask))) + 
   scale_fill_viridis_d(direction=-1) +
-  coord_sf(xlim=c(-180, 180), ylim=c(-90, 90)) +
+  coord_sf() + #xlim=c(-180, 180), ylim=c(-90, 90)) +
+  scale_x_continuous(limits = c(-180, 180), expand = c(0, 0)) + 
+  scale_y_continuous(limits = c(range(dt0$y)[1], range(dt0$y)[2]), expand = c(0, 0)) +
   xlab(NULL) + ylab(NULL)
 ```
 To evaluate thermal displacement under marine heatwaves, in Jacox et al. (2020):
@@ -73,11 +75,12 @@ That's why here we need to mask land, seaice, and some inland seas.
 ## Note: Time-consuming!! So if you don't want to re-calculate, just use saved data and re-load it 
 Recalculate <- FALSE
 if (!Recalculate) {
-  load("../data_src/mapfiles/sea_icemask_1982_2019avg_nc.RData")
+  #load("../data_src/stats/sea_icemask_1982_2019avg_nc.RData") #old
+  load("../data_src/stats/sea_icemask_1982_2021avg_nc.RData")
 } else {
   ## Read monthly icemask data, and must run R/01-1_OISST_monthly.Rmd first, with larger year range, e.g yrng=1982:2019
   vart <- "icemask"
-  yrng <- seq(1982,2019)
+  yrng <- seq(1982,2021) #2019 #old
   mmx <- 12
   gcnt <- 1 ## Cannot directly use sum/gcnt as average, because may have NA
   cntm <- matrix( rep( 0, len=1440*720), nrow = 1440)
@@ -117,9 +120,11 @@ if (!Recalculate) {
     } 
   }
 }
-
 icemask <- as.data.table(stx)
 icemask[, x:=fifelse(x>180, x-360, x)]
+```
+
+``` {r merge_land_sea_icemask, warning=FALSE, message=FALSE, results='hide'}
 dt <- merge(dt0, icemask, by=c("x", "y"), all=TRUE) ## this icemask is an average value through time
 dt[is.na(landmask), `:=`(landmask=0, seamask=1)]
 dt[seamask==1, seamask:=NA_integer_] ## reassign seamask according to average icemask
@@ -234,8 +239,12 @@ dt[x>=278.5 & x<315 & y>=27 & y<=47 & is.na(seamask), `:=`(seamask=17, region='U
 dt[seamask==17, remark:='US East Coast']
 
 ## Treat some water bodies as land ## https://github.com/mjacox/Thermal_Displacement/blob/master/oisst_an.m
-dt[x>=267 & x<285 & y>=41 & y<=50, seamask:=0] ## Great lakes
-dt[x>=269.5 & x<270.5 & y>=30 & y<=31, seamask:=0] ## Lake Ponchartrain
+dt[x>=267 & x<285 & y>=41 & y<=50, seamask:=0] ## Great lakes #But hereafter programs use landmask (here only change seamask)
+dt[x>=269.5 & x<270.5 & y>=30 & y<=31, `:=`(seamask=0, region='Lake Ponchartrain')] ## Lake Ponchartrain
+print(unique(dt[seamask==0 & landmask!=1, .(remark, region)]))
+#### We will use landmask -> land, new landmask is to mask land + inland lake
+dt[,land:=landmask]
+dt[seamask==0 & landmask!=1 & region %chin% c("Great Lakes", "Lake Ponchartrain"), landmask:=1]
 ```
 
 ```{r plot_land_seamask, warning=FALSE, message=FALSE, results='hide'}
@@ -249,7 +258,9 @@ ggplot() +
   scale_fill_manual(values = colors) +
   #coord_equal() + 
   #xlim(c(-180, 180)) + ylim(c(-90, 90)) +
-  coord_sf(xlim=c(-180, 180), ylim=c(-90, 90)) +
+  coord_sf() + #xlim=c(-180, 180), ylim=c(-90, 90)) +
+  scale_x_continuous(limits = c(-180, 180), expand = c(0, 0)) + 
+  scale_y_continuous(limits = c(-90, 90), expand = c(0, 0)) + 
   xlab(NULL) + ylab(NULL) +
   ggExtra::removeGrid(x=TRUE, y=TRUE) +
   theme(
@@ -258,6 +269,8 @@ ggplot() +
       panel.grid.major.x = element_blank(),
       panel.grid.major.y = element_blank(),
       panel.grid.minor = element_blank(),
+      plot.margin = unit(c(0,0,0,0), "cm"),
+      panel.spacing = unit(0,"cm"),
       strip.background = element_blank(),
       strip.text.y = element_text(angle = 0),
       axis.text.x  = element_text(family = "sans"),
@@ -281,12 +294,16 @@ ggplot() +
 if (Recalculate) {
   #dt[,`:=`(lon=NULL, lat=NULL, landmask=NULL)]
   fwrite(dt, file="../data_src/mapfiles/sea_icemask_025d.csv")
-  save(stx, file="../data_src/mapfiles/sea_icemask_1982_2019avg_nc.RData")
+  #save(stx, file="../data_src/mapfiles/sea_icemask_1982_2019avg_nc.RData") #old
+  try(system(paste0("zip -j -m -9 ", "../data_src/mapfiles/sea_icemask_025d.csv.zip ", "../data_src/mapfiles/sea_icemask_025d.csv")))
+  save(stx, file="../data_src/stats/sea_icemask_1982_2021avg_nc.RData")
 }
 ```
 
 ``` {r test_landmask, warning=FALSE, message=FALSE, results='hide'}
-land_mask <- fread("../data_src/mapfiles/sea_icemask_025d.csv")[, .(lon, lat, x, y, landmask)]
+# Note that in an earlier version used "GLDASp4 land mask" but current version use "GLDASp5"
+# The differnt version of land mask cause difference in the definition of land areas, so that sea-mask
+land_mask <- fread("unzip -p ../data_src/mapfiles/sea_icemask_025d.csv.zip")[, .(lon, lat, x, y, landmask)]
 setorder(land_mask, -y, x)
 land_mask[,ry:=rowid(x)]
 yy <- unique(land_mask[,.(y, ry)]) ## check, NOTE that in OISST.nc file, y is from Northest (89.875) to Southest (-89.875)
@@ -315,6 +332,8 @@ if (initialTrial) { #### Just a test to check landm really masking land, can be 
     geom_tile(data=land_mask, aes(x=lon, y=lat, fill=factor(landmask)), alpha=0.8) + 
     geom_point(data=yt, aes(lon,lat), color="red") + #Red points should always on land (landm == 1)
     scale_fill_viridis_d() +
-    coord_equal() + xlim(c(-15,15)) + ylim(c(min(yt$y)-5, max(yt$y)+5))
+    coord_sf() + #xlim(c(-15,15)) + ylim(c(min(yt$y)-5, max(yt$y)+5))
+    scale_x_continuous(limits = c(-15, 15), expand = c(0, 0)) + 
+    scale_y_continuous(limits = c(min(yt$y)-5, max(yt$y)+5), expand = c(0, 0))
 }  
 ```

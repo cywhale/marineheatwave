@@ -21,7 +21,7 @@ Marine Heatwaves (MHW). Original reference: https://www.nature.com/articles/s415
 
  - Original code ref (in Matlab): https://github.com/mjacox/Thermal_Displacement/
 
-``` {r required_package}
+``` {r required_package, warning=FALSE, message=FALSE, results='hide'}
 if (!require("curl")) install.packages("curl"); library(curl)
 if (!require("magrittr")) install.packages("magrittr"); library(magrittr)
 if (!require("data.table")) install.packages("data.table"); library(data.table)
@@ -61,7 +61,7 @@ Use R package "stars" to read .nc file (BTW, we used "ncdf4" package in the past
 
  - ref: https://r-spatial.github.io/stars/reference/read_stars.html
  
-``` {r required_stars, warning=FALSE}
+``` {r required_stars, warning=FALSE, message=FALSE}
 if (!require("stars")) install.packages("stars"); library(stars)
 if (!require("abind")) install.packages("abind"); library(abind)
 if (!require("dplyr")) install.packages("dplyr"); library(dplyr)
@@ -70,7 +70,7 @@ sts <- read_stars(fileo)
 str(sts)
 ```
 
-``` {r plot_stars_sst, message=FALSE, results='hide'}
+``` {r plot_stars_sst, warning=FALSE, message=FALSE, results='hide'}
 if (!require("ggplot2")) install.packages("ggplot2"); library(ggplot2)
 if (!require("ggExtra")) install.packages("ggExtra"); library(ggExtra)
 #if (!require("viridis")) install.packages("viridis"); library(viridis)
@@ -99,7 +99,9 @@ gx <- ggplot() +
     xlab(NULL) + ylab(NULL)
 # data range and color scale setup
 gx <- gx + 
-    coord_sf(xlim=c(0, 360), ylim=c(-90, 90)) +
+    coord_sf() + #xlim=c(0, 360), ylim=c(-90, 90)) +
+    scale_x_continuous(limits = c(0, 360), expand = c(0, 0)) + 
+    scale_y_continuous(limits = c(-90, 90), expand = c(0, 0)) +
     scale_fill_gradientn(toupper(var), colors = jet.colors(16), limits=c(minz, maxz),
                        breaks=seq(100*minz, 100*maxz, by = as.integer((maxz-minz)*100/3))/100)
 
@@ -112,6 +114,8 @@ gx <- gx +
       panel.grid.major.x = element_blank(),
       panel.grid.major.y = element_blank(),
       panel.grid.minor = element_blank(),
+      plot.margin = unit(c(0,0,0,0), "cm"),
+      panel.spacing = unit(0,"cm"),
       strip.background = element_blank(),
       strip.text.y = element_text(angle = 0),
       axis.text.x  = element_text(family = "sans"),
