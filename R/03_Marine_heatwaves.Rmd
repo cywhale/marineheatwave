@@ -1,0 +1,171 @@
+---
+title: "Evaluate marine heatwaves(MHW)"
+author: "cywhale"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    self-contained: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(tidy = FALSE)
+options(htmltools.dir.version = FALSE)
+options(useFancyQuotes = FALSE)
+source("00_OISST_include_plotx.R")
+```
+
+R code modified from https://github.com/mjacox/Thermal_Displacement/blob/master/define_heatwaves.m
+
+Note: "00_OISST_include_plotx.R" contains included library and gplotx function in previous Rmd files.
+
+``` {r define_mhw_setting, warning=FALSE, message=FALSE, results='hide'}
+yrng <- seq(1982,2022)
+clim_years = seq(1982,2011) #for climatology
+climyrs<- clim_years[length(clim_years)] - clim_years[1] + 1 #30 yrs
+monstr <- c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")
+
+endt <- "2022-05-22"
+trackdate <- seq.Date(as.IDate(endt)-6, as.IDate(endt), by="day")
+curryr <- year(as.IDate(endt))
+currmo <- month(as.IDate(endt))
+
+#### Define Marine heatwave is monthly anomaly > 90% historical anomaly
+Thresh <- 0.9
+Detrend <- TRUE #FALSE
+if (Detrend) {
+  prex <- "../data_src/oisst/monthly_anom_detrend/"
+  outd <- "../data_src/oisst/monthly_heatwave_detrend/"
+} else {
+  prex <- "../data_src/oisst/monthly_anom_icemask/"
+  outd <- "../data_src/oisst/monthly_heatwave/"
+}
+
+Recalculate_thre <- FALSE
+if (Recalculate_thre) {
+  
+# It's a 3-month running window, and use quantile(probs=Thresh=0.9) to aggregate the window and get the threshold(percentile>0.9) value
+sty <- future_lapply(1:12, function(j) {
+  if (j==1) {
+    winj = c(12, 1, 2)
+  } else if (j==12) {
+    winj = c(11, 12, 1)
+  } else {
+    winj = c(j-1, j , j+1)
+  }
+  monj <- fifelse(winj<10, paste0("0",winj), paste0(winj))
+  jstr <- monstr[j]
+  for (i in clim_years) {
+    if (winj[1] == 12 & (i-1)>=clim_years[1]) {
+      x0 <- read_stars(paste0(prex, i-1, monj[1], "_anom.nc"))
+    } else if (winj[1] == 12 & i==clim_years[1]) {
+      x0 <- NULL
+    } else {
+      x0 <- read_stars(paste0(prex, i, monj[1], "_anom.nc"))
+    }
+    
+    x1 <- read_stars(paste0(prex, i, monj[2], "_anom.nc"))
+    
+    if (winj[3] == 1 & (i+1)<=clim_years[length(clim_years)]) {
+      x2 <- read_stars(paste0(prex, i+1, monj[3], "_anom.nc"))
+    } else if (winj[3] == 1 & i==clim_years[length(clim_years)]) {
+      x2 <- NULL
+    } else {
+      x2 <- read_stars(paste0(prex, i, monj[3], "_anom.nc"))
+    }
+    
+    if (is.null(x0)) {
+      x <- c(x1, x2)
+      datex<- c(as.Date(paste0(i, monj[2], "01"), format="%Y%m%d"),
+                as.Date(paste0(i, monj[3], "01"), format="%Y%m%d"))
+    } else if (is.null(x2)) {
+      x <- c(x0, x1)
+      datex<- c(as.Date(paste0(i, monj[1], "01"), format="%Y%m%d"),
+                as.Date(paste0(i, monj[2], "01"), format="%Y%m%d"))
+    } else {
+      x <- c(x0, x1, x2)
+      datex<- c(fifelse(winj[1]==12, as.Date(paste0(i-1, monj[1], "01"), format="%Y%m%d"), as.Date(paste0(i, monj[1], "01"), format="%Y%m%d")),
+                as.Date(paste0(i, monj[2], "01"), format="%Y%m%d"),
+                fifelse(winj[3]==1, as.Date(paste0(i+1, monj[3], "01"), format="%Y%m%d"), as.Date(paste0(i, monj[3], "01"), format="%Y%m%d")))
+    }
+    if (i == clim_years[1]) {
+      styx <- x
+      datey<- datex
+    } else {
+      styx <- c(styx, x)
+      datey<- c(datey, datex)
+    }
+  }
+  print(paste0("Before process quantile, month: ", monj, " ..."))
+  
+  names(styx) <- rep(jstr, length(names(styx)))
+  styx <- merge(styx) %>% st_set_dimensions(3, values = as.POSIXct(datey), names = "time") %>% 
+    aggregate(by=paste0(climyrs, " years"), FUN=quantile, na.rm=TRUE, probs=Thresh, names=FALSE)
+  names(styx)[1] <- jstr
+  styx <- styx %>% dplyr::select(jstr) %>% adrop
+  return (styx)
+})
+
+  save(sty, file="../data_src/stats/sst_1982_2011mhw_threshold_nc.RData")
+} else {
+  load("../data_src/stats/sst_1982_2011mhw_threshold_nc.RData")
+}
+
+```
+```{r calculate_mhw, warning=FALSE, message=FALSE, results='hide'}
+Recalculate_mhw <- FALSE
+
+if (Recalculate_mhw) {
+for (i in yrng) {
+  mmx <- fifelse(i==curryr, currmo-1L, 12L)
+  for (j in 1:mmx) {
+    monj <- fifelse(j<10, paste0("0",j), paste0(j))
+    jstr <- monstr[j]
+    print(paste0("Now in Year-month: ", i," - ", monj, " to get heatwave"))
+    z <- read_stars(paste0(prex, i, monj, "_anom.nc"))
+    names(z)[1] <- "heatwave" 
+    zt <- matrix(rep(0, len=1440*720), nrow = 1440)
+    zt[which(z[[1]]>=sty[[j]][[1]] & z[[1]]>0)] <- 1 ## NOTE: HERE different with ref code, add criteria: ANOMALY > 0 (for MHWs)
+    z[[1]] <- zt
+
+    filet <- paste0(outd, i, monj, "_heatwave.nc")
+    write_stars(z, filet)
+  }
+}
+}
+```
+
+``` {r plot_result_calculate_anomaly, warning=FALSE, message=FALSE, results='hide', fig.height=4.9, fig.width=9.8}
+ht <- read_stars(paste0("../data_src/oisst/monthly_heatwave_detrend/202002_heatwave.nc"))
+names(ht)[1] <- "heatwave"
+
+dht <- as.data.table(ht) %>% 
+  .[,`:=`(x=fifelse(x>180, x-360, x))] %>% .[,.(x, y, heatwave)]
+
+ghx <- gplotx(dht, "heatwave", returnx=TRUE, minz=-0.4, maxz=1, maxlim=180, no_coord=TRUE, legend_label="2020-02 Marine Heatwaves  ", legend_pos=c(0.65, 0.09))
+ghx <- ghx + geom_sf(data = ne_coastline(scale = "large", returnclass = "sf"), color = 'darkgray', size = .3)
+
+ghx
+
+```
+``` {r plot_anomaly_mhw, warning=FALSE, message=FALSE, results='hide', fig.height=14.7, fig.width=9.8}
+zk <- read_stars(paste0("../data_src/oisst/monthly_anom_detrend/", 2020, "02", "_anom.nc"))
+zt <- read_stars(paste0("../data_src/oisst/monthly_anom_icemask/", 2020, "02", "_anom.nc"))
+names(zk)[1] <- "anom"
+names(zt)[1] <- "anom"
+
+zkt <- as.data.table(zk) %>% .[,`:=`(x=fifelse(x>180, x-360, x))] %>% .[,.(x, y, anom)]
+ztt <- as.data.table(zt) %>% .[,`:=`(x=fifelse(x>180, x-360, x))] %>% .[,.(x, y, anom)]
+
+#print(range(na.omit(zkt$anom))) #-9.520356  7.962329
+#print(range(na.omit(ztt$anom))) #-5.414660  7.204932
+
+gt <- gplotx(ztt, "anom", returnx=TRUE, minz=-5.5, maxz=7.5, fillopts=NA, legend_label="2020-02 Anomaly  ", legend_pos=c(0.65, 0.09), maxlim=180)
+
+gk <- gplotx(zkt, "anom", returnx=TRUE, minz=-10, maxz=7.5, fillopts=NA, legend_label="2020-02 Detrended Anomaly  ", legend_pos=c(0.65, 0.09), maxlim=180)
+
+layt <- rbind(c(1,1),c(2,2),c(3,3))
+
+grid.arrange(gt, gk, ghx,  layout_matrix=layt)
+```
