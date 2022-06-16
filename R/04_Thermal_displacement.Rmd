@@ -83,16 +83,21 @@ options(future.globals.maxSize= 1048576000*2)
 
 ``` {r coast_polygon, warning=FALSE, message=FALSE, results='hide'}
 if (!require("raster")) install.packages("raster"); library(raster)
-
-sp_coast <- ne_coastline() ## for ppp analysis, to check result
+Rerasterize <- FALSE
+if (Rerasterize) {
+  sp_coast <- ne_coastline() ## for ppp analysis, to check result
 # for 0-360 degree, not break whole contour, so require a continuous world...
 # https://gis.stackexchange.com/questions/266535/change-a-raster-from-longitude-display-180-180-to-0-360
-sx <- raster::rasterize(sp_coast, raster::raster())
-x1 <- crop(sx, extent(-180, 0, -90, 90))
-x2 <- crop(sx, extent(0, 180, -90, 90))
-x3 <- copy(x1)
-extent(x1) <- c(180, 360, -90, 90)
-mcoa <- merge(x3, x1, x2)
+  sx <- raster::rasterize(sp_coast, raster::raster())
+  x1 <- crop(sx, extent(-180, 0, -90, 90))
+  x2 <- crop(sx, extent(0, 180, -90, 90))
+  x3 <- copy(x1)
+  extent(x1) <- c(180, 360, -90, 90)
+  mcoa <- merge(x3, x1, x2)
+  save(mcoa, file="../data_src/mapfiles/coast_extend.RData")
+} else {
+  load(file="../data_src/mapfiles/coast_extend.RData")
+}
 plot(mcoa) #if want to plot in ppp_estimator, argument 'coast'=mcoa
 
 ```
@@ -143,7 +148,12 @@ intersect_poly <- function(site, poly, xy=c("longitude", "latitude"), polyid=NA,
   return(dt) #### othewise, return index of rows in poly, change the name "gid" to desired polyid
 }
 
+jet.colors <-
+  colorRampPalette(c("#00007F", "blue", "#007FFF", "cyan",
+                     "#7FFF7F", "yellow", "#FF7F00", "red", "#7F0000"))
+
 ppp_estimator <- function(yr, mon, tdf=NULL, heatwave=NULL, coast=NULL, xPlot=FALSE, xGjson=TRUE) {
+  #yr=2004; mon=4; tdf=NULL; heatwave=NULL; coast=mcoa; xPlot=TRUE; xGjson=TRUE; #for debugging
   jt <- as.integer(mon)
   mon <- fifelse(jt<10, paste0("0",jt), paste0(jt))
   if (is.null(tdf)) {
@@ -250,8 +260,20 @@ ppp_estimator <- function(yr, mon, tdf=NULL, heatwave=NULL, coast=NULL, xPlot=FA
   sf2y <- sf2x %>% #st_crop(xmin=xrng[1], ymin=-90, xmax=xrng[2], ymax=90) %>%
     sf::st_wrap_dateline(options = c("WRAPDATELINE=YES", "DATELINEOFFSET=180"))
 
-  cen1 <- st_centroid(sf1x) #dim(sf1x) is nx1
-  cen2 <- st_centroid(sf2x) #dim(sf2x) is mx1
+  cen1 <- st_centroid(sf1x) #dim(sf1x) is n x 1 #Note that use continous sf1x, not sf1y(who take cake dateline)
+  cen2 <- st_centroid(sf2x) #dim(sf2x) is m x 1
+  
+  if (FALSE) { #only Debug needed
+    xrng = range(c(st_coordinates(cen1)[,1], st_coordinates(cen2)[,1]))
+    yrng = range(c(st_coordinates(cen1)[,2], st_coordinates(cen2)[,2]))
+    plot(coast, col="grey", legend=F, axes=F, box=F, xlim=c(floor(xrng[1]), floor(xrng[2]+1)), ylim=c(floor(yrng[1])-1, floor(yrng[2]+1)+1)) #add=T, 
+    plot(sf1x, border="#F8766D80", xlim=c(floor(xrng[1]), floor(xrng[2]+1)), ylim=c(floor(yrng[1]), floor(yrng[2]+1)), add=T)
+    text(st_coordinates(cen1), labels=seq_along(1:nrow(cen1)), col="red", cex=0.75)
+    plot(sf2x, border="#00BFC480", add=T)
+    text(st_coordinates(cen2), labels=seq_along(1:nrow(cen2)), col="blue", cex=0.75, adj = c(0, 1))
+  }
+  
+  # st_nearest_feature auto conver long>180 to neg, and can be diff with nrx-> nmin result but still resonable
   # nrx <- st_nearest_feature(cen1, cen2) ## cannot solve bug GEOS has differ version in Linking (3.7.1) & runtime (3.4.2)
   nrx <- st_distance(cen1, cen2)  #dim(nrx) is nxm (distance matrix)
   nmin<- apply(nrx, 1, which.min) #BY ROW, length(nmin) = n; means which cen2 of sf2x (sst_displacement, DIS) has min distance to each cen1 (heatwaves, HW) of sf1x
@@ -304,14 +326,17 @@ ppp_estimator <- function(yr, mon, tdf=NULL, heatwave=NULL, coast=NULL, xPlot=FA
        sst_dis=sst_dis[which.max(ddis)], ddis=ddis[which.max(ddis)]), by=.(gid, nid, dmed)] 
   mnx[,`:=`(xm1=fifelse(sign(lng)*sign(xd) == -1 & (abs(lng)>150 | abs(xd)>150), fifelse(sign(lng) == -1, -180.0, 180.0), NA_real_), ym1=0.5*(lat+yd))][
       ,`:=`(xm2=fifelse(sign(lng)*sign(xd) == -1 & (abs(lng)>150 | abs(xd)>150), fifelse(sign(lng) == -1, 180.0, -180.0), NA_real_), ym2=ym1)]  
-  sfl <- copy(sflc)
-  sfl$level <- rev(as.integer(as.character(sflc$level))) - min(as.integer(as.character(sflh$level)))
-  sfl <- st_zm(sfl)
+  
+  sfl1 <- copy(sflc)
+  #sfl$level <- rev(as.integer(as.character(sflc$level))) - min(as.integer(as.character(sflh$level)))
+  sfl1$level <- c(1:nrow(sflc))
+  sfl1 <- st_zm(sfl1)
    
   sfl2 <- copy(sflh)
-  sfl2$level <- as.integer(as.character(sfl2$level))
+  #sfl2$level <- as.integer(as.character(sfl2$level))
+  sfl2$level <- c(1:nrow(sflh)) + 16 - nrow(sflh) #16 or 11 is the number or color palette allowed
   sfl2 <- st_zm(sfl2)
-  sfl <- rbind(sfl, sfl2)
+  sfl <- rbind(sfl1, sfl2)
 
   if (xPlot) {
     if (is.null(heatwave)) {
@@ -326,10 +351,12 @@ ppp_estimator <- function(yr, mon, tdf=NULL, heatwave=NULL, coast=NULL, xPlot=FA
       geom_point(data=zc1, aes(x=lng, y=lat), alpha=0.75, col="orange", size = 0.01, stroke = 0, shape = 16) + 
       geom_point(data=zh1, aes(x=lng, y=lat), alpha=0.75, col="purple", size = 0.01, stroke = 0, shape = 16) + 
       geom_sf(data = ne_coastline(scale = "large", returnclass = "sf"), color = 'darkgray', size = .3) +
-      geom_sf(data = sfl, aes(color=factor(level))) +
-      scale_colour_brewer(palette = "RdYlGn") +
-      geom_sf(data = sf1y, fill="#F8766D80") + 
-      geom_sf(data = sf2y, fill="#00BFC480") +
+      geom_sf(data = sfl, aes(color=level)) + #factor(level)
+      #scale_colour_brewer(palette = "RdYlBu") +
+      #scale_colour_brewer(palette = "RdYlBu", direction = -1) +
+      scale_colour_gradientn(colours=rev(jet.colors(16))) +  
+      geom_sf(data = sf1y, fill="#F8766D80", color="#F8766D80", alpha=0.5) + 
+      geom_sf(data = sf2y, fill="#00BFC480", color="#00BFC480", alpha=0.5) +
       guides(fill="none", color="none") + coord_sf() + #xlim(c(-180, 180)) + ylim(c(-90, 90)) +
       scale_x_continuous(limits = c(-180, 180), expand = c(0, 0)) + 
       scale_y_continuous(limits = c(-90, 90), expand = c(0, 0)) +
@@ -534,4 +561,71 @@ for (i in yrng) {
 
 g1 <- ppp_estimator(yr=2020, mon=2, xPlot=TRUE, xGjson=FALSE)
 g1
+```
+
+``` {r reload_stored_geojson, warning=FALSE, message=FALSE, results='hide'}
+yr=2018
+mon="06"
+outdir <- "../data_src/oisst/thermal_displace/"
+sf1d <- st_read(paste0(outdir, yr, mon, "_hwv_occ_poly.geojson"))
+sf2d <- st_read(paste0(outdir, yr, mon, "_hwv_dis_poly.geojson"))
+sfl1 <- st_read(paste0(outdir, yr, mon, "_hwv_occ_contour.geojson"))
+sfl2 <- st_read(paste0(outdir, yr, mon, "_hwv_dis_contour.geojson"))
+sfc1 <- st_read(paste0(outdir, yr, mon, "_hwv_occ.geojson"))
+sfc2 <- st_read(paste0(outdir, yr, mon, "_hwv_dis.geojson"))
+mnxf <- st_read(paste0(outdir, yr, mon, "_hwv_dis_correspond.geojson"))
+mnx <- cbind(as.data.table(sf::st_coordinates(mnxf)) %>% setnames(1:2, c("lng","lat")), as.data.table(mnxf))
+mnx[xm1=="NA", xm1:=NA]
+mnx[xm2=="NA", xm2:=NA]
+
+sfl1$level <- c(1:nrow(sfl1))
+sfl2$level <- c(1:nrow(sfl2)) + 16 - nrow(sfl2) 
+sflt <- rbind(sfl1, sfl2)
+```
+
+``` {r replot_stored_geojson, warning=FALSE, message=FALSE, results='hide', fig.height=4.9, fig.width=9.8}
+heatwave <- read_stars(paste0("../data_src/oisst/monthly_heatwave_detrend/", yr, mon, "_heatwave.nc"))
+names(heatwave)[1] <- "heatwave"      
+ht <- as.data.table(heatwave) %>% 
+      .[,`:=`(longitude=fifelse(x>180, x-360, x), latitude=y)] %>% .[,.(longitude, latitude, heatwave)]
+
+gf <- ggplot() +  
+      geom_point(data=ht[heatwave==1,], aes_string(x="longitude", y="latitude"), alpha=0.65, col="gold", size = 0.01, stroke = 0, shape = 16) +
+      geom_sf(data=sfc1, alpha=0.75, col="orange", size = 0.01, stroke = 0, shape = 16) + 
+      geom_sf(data=sfc2, alpha=0.75, col="purple", size = 0.01, stroke = 0, shape = 16) + 
+      geom_sf(data = ne_coastline(scale = "large", returnclass = "sf"), color = 'darkgray', size = .3) +
+      geom_sf(data = sflt, aes(color=level)) +
+      scale_colour_gradientn(colours=rev(jet.colors(16))) +  
+      geom_sf(data = sf1d, fill="#F8766D80", color="#F8766D80", alpha=0.5) + 
+      geom_sf(data = sf2d, fill="#00BFC480", color="#00BFC480", alpha=0.5) +
+      guides(fill="none", color="none") + coord_sf() + #xlim(c(-180, 180)) + ylim(c(-90, 90)) +
+      scale_x_continuous(limits = c(-180, 180), expand = c(0, 0)) + 
+      scale_y_continuous(limits = c(-90, 90), expand = c(0, 0)) +
+      labs(x="Longitude",y="Latitude") +
+      theme(
+        panel.background = element_rect(fill="white"),
+        panel.border = element_rect(colour = "black", fill=NA, size=0.75),
+        panel.grid.major = element_line(colour = "lightgrey"),
+        panel.grid.minor = element_line(colour = "lightgrey"),
+        strip.background = element_blank(),
+        strip.text.y = element_text(angle = 0),#,face = "italic"),
+        legend.background = element_rect(fill = "transparent", colour = "transparent"),#, #"white"),
+        legend.position = NULL
+      )
+
+    
+    if (any(!is.na(mnx$xm1))) {
+      gf <- gf +
+        geom_segment(data=mnx[!is.na(xm1),], aes(x=lng, xend=xm1, y=lat, yend=ym1), size = 0.75, color="purple") + #, color=factor(seamask)
+        geom_segment(data=mnx[!is.na(xm1),], aes(x=xm2, xend=xd, y=ym2, yend=yd), size = 0.75, arrow = arrow(length = unit(0.08, "cm")), color="purple") + 
+        geom_segment(data=mnx[is.na(xm1),], aes(x=lng, xend=xd, y=lat, yend=yd), size = 0.75, arrow = arrow(length = unit(0.08, "cm")), color="purple") + 
+        geom_text_repel(data=mnx[!is.na(xm1),], aes(x=xd, y=yd, label=paste0(round(ddis,0), " km")), color = "black", size=3, hjust=1, vjust=1) + #geom_text
+        geom_text_repel(data=mnx[is.na(xm1),], aes(x=0.5*(lng+xd), y=0.5*(lat+yd), label=paste0(round(ddis,0), " km")), color = "black", size=3, hjust=1, vjust=1)
+    } else {
+      gf <- gf +
+        geom_segment(data=mnx, aes(x=lng, xend=xd, y=lat, yend=yd), size = 0.75, arrow = arrow(length = unit(0.08, "cm")), color="purple") + 
+        geom_text_repel(data=mnx, aes(x=0.5*(lng+xd), y=0.5*(lat+yd), label=paste0(round(ddis,0), " km")), color = "black", size=3, hjust=1, vjust=1) 
+    }
+
+gf      
 ```
