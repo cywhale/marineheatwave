@@ -524,3 +524,66 @@ grid.arrange(gyk, gzk, gz, layout_matrix=layt)
 #gz
 
 ```
+``` {r stacked_sst, warning=FALSE, message=FALSE, results='hide'}
+if (!require("layer")) {
+  if (!require("remotes")) install.packages("remotes"); library(remotes)
+  remotes::install_github("marcosci/layer")
+  library(layer)
+}
+
+Reload_sst_nc <- FALSE
+if (Reload_sst_nc) {
+  sst1 <- read_stars(paste0("../data_src/oisst/monthly_sst/202002_sst.nc"))
+  names(sst1)[1] <- "sst"
+
+  sst202002 <-  as.data.table(sst1) %>% 
+    .[,`:=`(longitude=fifelse(x>180, x-360, x), latitude=y)] %>% 
+    #.[,.(longitude, latitude, heatwave)] %>%
+    .[x>=100 & x<=180 & latitude>=-45 & latitude <= 35,] %>% #x<=300
+    .[,`:=`(x=NULL, y=NULL)] %>%
+    st_as_sf(coords=c("longitude", "latitude"))
+
+  sst2 <- read_stars(paste0("../data_src/oisst/monthly_sst/201002_sst.nc"))
+  names(sst2)[1] <- "sst"
+
+  sst201002 <-  as.data.table(sst2) %>% 
+    .[,`:=`(longitude=fifelse(x>180, x-360, x), latitude=y)] %>% 
+    .[x>=100 & x<=180 & latitude>=-45 & latitude <= 35,] %>% #x<=300
+    .[,`:=`(x=NULL, y=NULL)] %>%
+    st_as_sf(coords=c("longitude", "latitude"))
+
+  sst3 <- read_stars(paste0("../data_src/oisst/monthly_sst/200002_sst.nc"))
+  names(sst3)[1] <- "sst"
+
+  sst200002 <-  as.data.table(sst3) %>% 
+    .[,`:=`(longitude=fifelse(x>180, x-360, x), latitude=y)] %>% 
+    .[x>=100 & x<=180 & latitude>=-45 & latitude <= 35,] %>% #x<=300
+    .[,`:=`(x=NULL, y=NULL)] %>%
+    st_as_sf(coords=c("longitude", "latitude"))
+
+  sst4 <- read_stars(paste0("../data_src/oisst/monthly_sst/199002_sst.nc"))
+  names(sst4)[1] <- "sst"
+
+  sst199002 <-  as.data.table(sst4) %>% 
+    .[,`:=`(longitude=fifelse(x>180, x-360, x), latitude=y)] %>% 
+    .[x>=100 & x<=180 & latitude>=-45 & latitude <= 35,] %>% #x<=300
+    .[,`:=`(x=NULL, y=NULL)] %>%
+    st_as_sf(coords=c("longitude", "latitude"))
+  
+  save(sst199002, sst200002, sst201002, sst202002, file="../data_src/stats/sst_1990_2020_stack.RData")
+} else {
+  load("../data_src/stats/sst_1990_2020_stack.RData")
+}
+
+tl0 <- layer::tilt_map(sst199002)
+tl1 <- layer::tilt_map(sst200002, y_shift=75)
+tl2 <- layer::tilt_map(sst201002, y_shift=150)
+tl3 <- layer::tilt_map(sst202002, y_shift=225)
+
+map_list <- list(tl0, tl1, tl2, tl3)
+
+```
+``` {r plot_stacked_sst, warning=FALSE, message=FALSE, results='hide', fig.height=14.7, fig.width=9.8}
+#palettem: https://cran.r-project.org/web/packages/viridis/vignettes/intro-to-viridis.html
+layer::plot_tiltedmaps(map_list, palette = "turbo")
+```

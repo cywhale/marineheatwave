@@ -169,3 +169,66 @@ layt <- rbind(c(1,1),c(2,2),c(3,3))
 
 grid.arrange(gt, gk, ghx,  layout_matrix=layt)
 ```
+
+``` {r stacked_layers, warning=FALSE, message=FALSE, results='hide'}
+if (!require("layer")) {
+  if (!require("remotes")) install.packages("remotes"); library(remotes)
+  remotes::install_github("marcosci/layer")
+  library(layer)
+}
+
+Reload_hw_nc <- FALSE
+if (Reload_hw_nc) {
+  hw202002 <-  as.data.table(ht) %>% 
+    .[,`:=`(longitude=fifelse(x>180, x-360, x), latitude=y)] %>% 
+    #.[,.(longitude, latitude, heatwave)] %>%
+    .[x>=100 & x<=180 & latitude>=-45 & latitude <= 35,] %>% #x<=300
+    .[,`:=`(x=NULL, y=NULL)] %>%
+    st_as_sf(coords=c("longitude", "latitude"))
+
+  ht1 <- read_stars(paste0("../data_src/oisst/monthly_heatwave_detrend/201002_heatwave.nc"))
+  names(ht1)[1] <- "heatwave"
+
+  hw201002 <-  as.data.table(ht1) %>% 
+    .[,`:=`(longitude=fifelse(x>180, x-360, x), latitude=y)] %>% 
+    .[x>=100 & x<=180 & latitude>=-45 & latitude <= 35,] %>% #x<=300
+    .[,`:=`(x=NULL, y=NULL)] %>%
+    st_as_sf(coords=c("longitude", "latitude"))
+
+  ht2 <- read_stars(paste0("../data_src/oisst/monthly_heatwave_detrend/200002_heatwave.nc"))
+  names(ht2)[1] <- "heatwave"
+
+  hw200002 <-  as.data.table(ht2) %>% 
+    .[,`:=`(longitude=fifelse(x>180, x-360, x), latitude=y)] %>% 
+    .[x>=100 & x<=180 & latitude>=-45 & latitude <= 35,] %>% #x<=300
+    .[,`:=`(x=NULL, y=NULL)] %>%
+    st_as_sf(coords=c("longitude", "latitude"))
+
+  ht3 <- read_stars(paste0("../data_src/oisst/monthly_heatwave_detrend/199002_heatwave.nc"))
+  names(ht3)[1] <- "heatwave"
+
+  hw199002 <-  as.data.table(ht3) %>% 
+    .[,`:=`(longitude=fifelse(x>180, x-360, x), latitude=y)] %>% 
+    .[x>=100 & x<=180 & latitude>=-45 & latitude <= 35,] %>% #x<=300
+    .[,`:=`(x=NULL, y=NULL)] %>%
+    st_as_sf(coords=c("longitude", "latitude"))
+  
+  save(hw199002, hw200002, hw201002, hw202002, file="../data_src/stats/heatwave_1990_2020_stack.RData")
+} else {
+  load("../data_src/stats/heatwave_1990_2020_stack.RData")
+}
+
+tl0 <- layer::tilt_map(hw199002)
+tl1 <- layer::tilt_map(hw200002, y_shift=75)
+tl2 <- layer::tilt_map(hw201002, y_shift=150)
+tl3 <- layer::tilt_map(hw202002, y_shift=225)
+
+map_list <- list(tl0, tl1, tl2, tl3)
+
+```
+``` {r plot_stacked_layers, warning=FALSE, message=FALSE, results='hide', fig.height=14.7, fig.width=9.8}
+#palettem: https://cran.r-project.org/web/packages/viridis/vignettes/intro-to-viridis.html
+layer::plot_tiltedmaps(map_list, palette = "cividis")
+```
+
+
