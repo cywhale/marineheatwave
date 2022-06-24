@@ -182,7 +182,14 @@ ppp_estimator <- function(yr, mon, tdf=NULL, heatwave=NULL, coast=NULL, xPlot=FA
   Window(ptc) <- owin(xrange=c(-180,360), yrange=c(-90,90))
   kzc <- density(ptc, sigma=15,  kernel = "quartic", adjust = 0.2, cut=6) #, ext=extent(x))
   kzct <- copy(kzc)
-  kzct[kzct<5] <- NA
+  thre_kzc <- as.integer(quantile(kzc[kzc>=3])[4]) #75% = 3/4 quantile 
+  if (thre_kzc>=5) {
+    kzct[kzct<5] <- NA
+  } else {
+    #kzct[kzct<thre_kzc] <- NA
+    #kzct[kzct<as.numeric(quantile(kzc[kzc>=3])[3])] <- NA #50% = median
+    kzct[kzct<3] <- NA #too less kzct will cause contour not closed and make PolyC NULL
+  }
 
 ## Thermal displacement candidates occurs at zh with its sst (sst_dis)    
   zhm <- zt[xd<0, .(xd, yd, sst_dis, rowid)] %>% setnames(1:3, c("lng","lat","sst"))
@@ -192,7 +199,13 @@ ppp_estimator <- function(yr, mon, tdf=NULL, heatwave=NULL, coast=NULL, xPlot=FA
   Window(pth) <- owin(xrange=c(-180,360), yrange=c(-90,90))
   kzh <- density(pth, sigma=15,  kernel = "quartic", adjust = 0.2, cut=6)
   kzht <- copy(kzh)
-  kzht[kzht<5] <- NA
+  if (thre_kzc>=5) {
+    kzht[kzht<5] <- NA
+  } else {
+    #kzht[kzht<thre_kzc] <- NA
+    #kzht[kzht<as.numeric(quantile(kzh[kzh>=3])[3])] <- NA #50% = median
+    kzht[kzht<3] <- NA
+  }
 
   if (xPlot) {
     plot(kzc, main=NULL, las=1, box=FALSE,axes=FALSE, ribbon =FALSE, useRaster=FALSE, xlim=c(-180,360), ylim=c(-90,90))
@@ -244,14 +257,18 @@ ppp_estimator <- function(yr, mon, tdf=NULL, heatwave=NULL, coast=NULL, xPlot=FA
     # sflc$geometry <- (st_geometry(sflc) + c(360,90)) %% c(360) - c(0,90) 
     #sf::st_wrap_dateline(options = c("WRAPDATELINE=YES", "DATELINEOFFSET=180"))
   sflc <- lapply(1:nrow(sflct), function(x) {
-    sf::st_wrap_dateline(sflct[x,],options = c("WRAPDATELINE=YES", "DATELINEOFFSET=180"))
+    #sftx <- st_cast(sflct[x,], "MULTILINESTRING")
+    #sf::st_wrap_dateline(sftx, options = c("WRAPDATELINE=YES", "DATELINEOFFSET=180"))
+    sf::st_wrap_dateline(sflct[x,], options = c("WRAPDATELINE=YES", "DATELINEOFFSET=180")) %>%
+        st_cast("MULTILINESTRING") %>% st_zm
   }) %>% do.call(rbind, .)
   st_crs(sflc) <- 4326
   
-  sflht <- st_as_sf(sldh, crs=4326) %>% st_crop(xmin=xrng[1], ymin=-90, xmax=xrng[2], ymax=90) #%>%
+  sflht <- st_as_sf(sldh, dim = "XY", crs=4326) %>% st_crop(xmin=xrng[1], ymin=-90, xmax=xrng[2], ymax=90) #%>%
     #sf::st_wrap_dateline(options = c("WRAPDATELINE=YES", "DATELINEOFFSET=180"))
   sflh <- lapply(1:nrow(sflht), function(x) {
-    sf::st_wrap_dateline(sflht[x,],options = c("WRAPDATELINE=YES", "DATELINEOFFSET=180"))
+    sf::st_wrap_dateline(sflht[x,], options = c("WRAPDATELINE=YES", "DATELINEOFFSET=180")) %>%
+        st_cast("MULTILINESTRING") %>% st_zm
   }) %>% do.call(rbind, .)
   st_crs(sflh) <- 4326
   
@@ -372,17 +389,19 @@ ppp_estimator <- function(yr, mon, tdf=NULL, heatwave=NULL, coast=NULL, xPlot=FA
         legend.position = NULL
       )
     
-    if (any(!is.na(mnx$xm1))) {
-      g1 <- g1 +
-        geom_segment(data=mnx[!is.na(xm1),], aes(x=lng, xend=xm1, y=lat, yend=ym1), size = 0.75, color="purple") + #, color=factor(seamask)
-        geom_segment(data=mnx[!is.na(xm1),], aes(x=xm2, xend=xd, y=ym2, yend=yd), size = 0.75, arrow = arrow(length = unit(0.08, "cm")), color="purple") + 
-        geom_segment(data=mnx[is.na(xm1),], aes(x=lng, xend=xd, y=lat, yend=yd), size = 0.75, arrow = arrow(length = unit(0.08, "cm")), color="purple") + 
-        geom_text_repel(data=mnx[!is.na(xm1),], aes(x=xd, y=yd, label=paste0(round(ddis,0), " km")), color = "black", size=3, hjust=1, vjust=1) + #geom_text
-        geom_text_repel(data=mnx[is.na(xm1),], aes(x=0.5*(lng+xd), y=0.5*(lat+yd), label=paste0(round(ddis,0), " km")), color = "black", size=3, hjust=1, vjust=1)
-    } else {
-      g1 <- g1 +
-        geom_segment(data=mnx, aes(x=lng, xend=xd, y=lat, yend=yd), size = 0.75, arrow = arrow(length = unit(0.08, "cm")), color="purple") + 
-        geom_text_repel(data=mnx, aes(x=0.5*(lng+xd), y=0.5*(lat+yd), label=paste0(round(ddis,0), " km")), color = "black", size=3, hjust=1, vjust=1) 
+    if (nrow(mnx)>0) {
+      if (any(!is.na(mnx$xm1))) {
+        g1 <- g1 +
+          geom_segment(data=mnx[!is.na(xm1),], aes(x=lng, xend=xm1, y=lat, yend=ym1), size = 0.75, color="purple") + #, color=factor(seamask)
+          geom_segment(data=mnx[!is.na(xm1),], aes(x=xm2, xend=xd, y=ym2, yend=yd), size = 0.75, arrow = arrow(length = unit(0.08, "cm")), color="purple") + 
+          geom_segment(data=mnx[is.na(xm1),], aes(x=lng, xend=xd, y=lat, yend=yd), size = 0.75, arrow = arrow(length = unit(0.08, "cm")), color="purple") + 
+          geom_text_repel(data=mnx[!is.na(xm1),], aes(x=xd, y=yd, label=paste0(round(ddis,0), " km")), color = "black", size=3, hjust=1, vjust=1) + #geom_text
+          geom_text_repel(data=mnx[is.na(xm1),], aes(x=0.5*(lng+xd), y=0.5*(lat+yd), label=paste0(round(ddis,0), " km")), color = "black", size=3, hjust=1, vjust=1)
+      } else {
+        g1 <- g1 +
+          geom_segment(data=mnx, aes(x=lng, xend=xd, y=lat, yend=yd), size = 0.75, arrow = arrow(length = unit(0.08, "cm")), color="purple") + 
+          geom_text_repel(data=mnx, aes(x=0.5*(lng+xd), y=0.5*(lat+yd), label=paste0(round(ddis,0), " km")), color = "black", size=3, hjust=1, vjust=1) 
+      }
     }
     #dev.off()
     #g1
@@ -406,8 +425,12 @@ ppp_estimator <- function(yr, mon, tdf=NULL, heatwave=NULL, coast=NULL, xPlot=FA
     geojson_write(sf1d, file = paste0(outdir, yr, mon, "_hwv_occ_poly.geojson"))
     geojson_write(sf2d, file = paste0(outdir, yr, mon, "_hwv_dis_poly.geojson"))
     
-    mnxf <- st_as_sf(mnx, coords=c("lng", "lat"), crs=4326)
-    geojson_write(mnxf, file = paste0(outdir, yr, mon, "_hwv_dis_correspond.geojson"))
+    if (nrow(mnx)>0) {
+      mnxf <- st_as_sf(mnx, coords=c("lng", "lat"), crs=4326)
+      geojson_write(mnxf, file = paste0(outdir, yr, mon, "_hwv_dis_correspond.geojson"))
+    } else {
+      print(paste0("Warning: No displacement vector in: ", yr, "-", mon))
+    }
   }
   print(paste0("Successfully output Year-month: ", yr," - ", mon, " geojson for thermal displacement"))
   if (xPlot) {
