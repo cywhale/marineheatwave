@@ -38,7 +38,7 @@ First we download dataset from NOAA OISST v2.1. The dataset metadata: https://ww
 baseurl <- "https://www.ncei.noaa.gov/data/sea-surface-temperature-optimum-interpolation/v2.1/access/avhrr"
 
 # define a file download save path
-monthi<- "198801"
+monthi<- "201109"
 datei <- paste0(monthi, "01")
 fileprex <- "oisst-avhrr-v02r01"
 filename <- paste(fileprex, datei, "nc", sep=".")
@@ -133,5 +133,62 @@ gx <- gx +
       legend.position = "bottom"
     )
 gx
+
+```
+
+
+``` {r read_sst_anomaly, warning=FALSE, message=FALSE, results='hide'}
+var <- "anom" #use abind::adrop to drop undesired dimentions except anom = sst anomaly
+za <- sts %>% dplyr::select(var) %>% adrop 
+da <- as.data.frame(za)
+da[,var] <- unclass(da[,var])
+setDT(da)[1:10,]
+```
+
+``` {r plot_sst_anomaly, warning=FALSE, message=FALSE, results='hide'}
+minz <- -4; maxz <- 6
+anom.colors <-
+  colorRampPalette(c("#00007F", "blue", "#007FFF", "#00d0ff", "#83e6fc", "white", 
+                     "yellow", "#FF8800", "#ff5e00", "#ff3700", "red", "#7F0000"))
+ga <- ggplot() +  
+    geom_tile(data=da, aes_string(x="x", y="y", fill=var), alpha=0.8) + 
+    xlab(NULL) + ylab(NULL)
+# data range and color scale setup
+ga <- ga + 
+    coord_sf() + 
+    scale_x_continuous(limits = c(0, 360), expand = c(0, 0)) + 
+    scale_y_continuous(limits = c(-90, 90), expand = c(0, 0)) +
+    scale_fill_gradientn(toupper(var), colors = anom.colors(16), limits=c(minz, maxz),
+                       breaks=c(-4.0, -2.0, -1.5, -1.0, -0.5, 0, 0.5, 1.0, 1.5, 2.0, 4.0, 6.0))
+
+# plot panel setup
+ga <- ga + 
+    ggExtra::removeGrid(x=TRUE, y=TRUE) +
+    theme(
+      panel.background = element_blank(), 
+      panel.border = element_rect(colour = "black", fill=NA, size=0.75),
+      panel.grid.major.x = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor = element_blank(),
+      plot.margin = unit(c(0,0,0,0), "cm"),
+      panel.spacing = unit(0,"cm"),
+      strip.background = element_blank(),
+      strip.text.y = element_text(angle = 0),
+      axis.text.x  = element_text(family = "sans"),
+      axis.title.x = element_text(family = "sans"),
+      axis.title.y = element_text(family = "sans"),
+      axis.text.y = element_text(family = "sans"),
+      legend.key = element_blank(),
+      legend.key.size = unit(0.6,"line"),
+      legend.box.background = element_blank(),
+      legend.title = element_text(size=10),
+      legend.text =  element_text(family = "sans", size=6),
+      legend.background = element_rect(fill = "transparent", colour = "transparent"),
+      legend.direction="horizontal",
+      legend.key.height = unit(0.2, 'cm'),
+      legend.key.width = unit(1.5, 'cm'),
+      legend.position = "bottom"
+    )
+ga
 
 ```
