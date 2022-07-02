@@ -73,7 +73,9 @@ The metadata of NOAA OISST v2.1 datasets: "Three other maps at the same 1/4° sp
 
 
 ```{r parallel_curl_download, warning=FALSE, message=FALSE, results='hide'}
-for (i in yrng) {
+Remonthly = FALSE
+if (Remonthly) {
+  for (i in yrng) {
     mmx <- fifelse(i==curryr, currmo-1L, 12L)
     for (j in startm:mmx) {
       monj <- fifelse(j<10, paste0("0",j), paste0(j))
@@ -125,7 +127,8 @@ for (i in yrng) {
     }
   #We can compress files if would not be used any more later  
   #if (i!=curryr) try(system(paste0("zip -j -m -9 ", dest, "zip/", i, ".zip ", dest, fileprex, ".", i, "*.nc")))
-}
+  }
+}  
 ```
 
 According to 01_OISST_data.Rmd plotting, we can customize a plot functions
@@ -242,7 +245,7 @@ gplotx <- function(z, var="sst", returnx=FALSE, minz=NA_real_, maxz=NA_real_, no
   gx
 }
 
-plot_stars <- function (file, var="", name=var, ...) {
+plot_stars <- function(file, var="", name=var, ...) {
   xt <- read_stars(file)
   
   if (is.na(var) | var=="") {
@@ -252,14 +255,72 @@ plot_stars <- function (file, var="", name=var, ...) {
     gplotx(z, name, ...)
   }
 }
-
 ```
 
 
 ``` {r plot_monthly_var, warning=FALSE, message=FALSE, results='hide'}
 plot_stars("../data_src/oisst/monthly_sst/202205_sst.nc", "", "sst")
-plot_stars("../data_src/oisst/monthly_anom/202205_anom.nc", "", "anom")
 plot_stars("../data_src/oisst/monthly_icemask/202205_icemask.nc", "", "icemask")
 
+```
+
+`````` {r plot_monthly_anom, warning=FALSE, message=FALSE, results='hide'}
+plot_anom <- function(file, var="anom", name=var, returnx=FALSE, 
+                      minz=-4, maxz=6) { #code the same as 01_OISST_data.Rmd
+  xt <- read_stars(file)
+  names(xt)[1] <- var
+  z <- xt %>% dplyr::select(var) %>% adrop 
+  da <- as.data.frame(z)
+  #colnames(da)[3] <- var
+  zcol <- grep(var, colnames(da))
+  da[,zcol] <- unclass(da[,zcol])
+  
+  anom.colors <-
+    colorRampPalette(c("#00007F", "blue", "#007FFF", "#00d0ff", "#83e6fc", "white", 
+                       "yellow", "#FF8800", "#ff5e00", "#ff3700", "red", "#7F0000"))
+  ga <- ggplot() +  
+      geom_tile(data=da, aes_string(x="x", y="y", fill=var), alpha=0.8) + 
+      xlab(NULL) + ylab(NULL)
+  
+  ga <- ga + 
+      coord_sf() + 
+      scale_x_continuous(limits = c(0, 360), expand = c(0, 0)) + 
+      scale_y_continuous(limits = c(-90, 90), expand = c(0, 0)) +
+      scale_fill_gradientn(toupper(var), colors = anom.colors(16), limits=c(minz, maxz),
+                         breaks=c(-4.0, -2.0, -1.5, -1.0, -0.5, 0, 0.5, 1.0, 1.5, 2.0, 4.0, 6.0))
+
+  ga <- ga + 
+    ggExtra::removeGrid(x=TRUE, y=TRUE) +
+    theme(
+      panel.background = element_blank(), 
+      panel.border = element_rect(colour = "black", fill=NA, size=0.75),
+      panel.grid.major.x = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor = element_blank(),
+      plot.margin = unit(c(0,0,0,0), "cm"),
+      panel.spacing = unit(0,"cm"),
+      strip.background = element_blank(),
+      strip.text.y = element_text(angle = 0),
+      axis.text.x  = element_text(family = "sans"),
+      axis.title.x = element_text(family = "sans"),
+      axis.title.y = element_text(family = "sans"),
+      axis.text.y = element_text(family = "sans"),
+      legend.key = element_blank(),
+      legend.key.size = unit(0.6,"line"),
+      legend.box.background = element_blank(),
+      legend.title = element_text(size=10),
+      legend.text =  element_text(family = "sans", size=6),
+      legend.background = element_rect(fill = "transparent", colour = "transparent"),
+      legend.direction="horizontal",
+      legend.key.height = unit(0.2, 'cm'),
+      legend.key.width = unit(1.5, 'cm'),
+      legend.position = "bottom"
+    )
+  if (returnx) {return(ga)}
+  ga
+}
+
+ga <- plot_anom("../data_src/oisst/monthly_anom/202205_anom.nc", "anom", "anom", returnx=TRUE)
+ga
 
 ```
