@@ -137,13 +137,13 @@ for (i in yrng) {
 ```
 
 ``` {r plot_result_calculate_anomaly, warning=FALSE, message=FALSE, results='hide', fig.height=4.9, fig.width=9.8}
-ht <- read_stars(paste0("../data_src/oisst/monthly_heatwave_detrend/202002_heatwave.nc"))
+ht <- read_stars(paste0("../data_src/oisst/monthly_heatwave_detrend/202204_heatwave.nc"))
 names(ht)[1] <- "heatwave"
 
 dht <- as.data.table(ht) %>% 
   .[,`:=`(x=fifelse(x>180, x-360, x))] %>% .[,.(x, y, heatwave)]
 
-ghx <- gplotx(dht, "heatwave", returnx=TRUE, minz=-0.4, maxz=1, maxlim=180, no_coord=TRUE, legend_label="2020-02 Marine Heatwaves  ", legend_pos=c(0.65, 0.09))
+ghx <- gplotx(dht, "heatwave", returnx=TRUE, minz=-0.4, maxz=1, maxlim=180, no_coord=TRUE, legend_label="2022-04 Marine Heatwaves  ", legend_pos=c(0.65, 0.09))
 ghx <- ghx + geom_sf(data = ne_coastline(scale = "large", returnclass = "sf"), color = 'darkgray', size = .3)
 
 ghx
