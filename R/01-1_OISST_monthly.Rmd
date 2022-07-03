@@ -264,7 +264,7 @@ plot_stars("../data_src/oisst/monthly_icemask/202205_icemask.nc", "", "icemask")
 
 ```
 
-`````` {r plot_monthly_anom, warning=FALSE, message=FALSE, results='hide'}
+``` {r func_monthly_anom, warning=FALSE, message=FALSE, results='hide'}
 plot_anom <- function(file, var="anom", name=var, returnx=FALSE, 
                       minz=-4, maxz=6) { #code the same as 01_OISST_data.Rmd
   xt <- read_stars(file)
@@ -319,8 +319,10 @@ plot_anom <- function(file, var="anom", name=var, returnx=FALSE,
   if (returnx) {return(ga)}
   ga
 }
+```
 
-ga <- plot_anom("../data_src/oisst/monthly_anom/202205_anom.nc", "anom", "anom", returnx=TRUE)
-ga
+``` {r plot_monthly_anom, warning=FALSE, message=FALSE, results='hide'}
+ga1 <- plot_anom("../data_src/oisst/monthly_anom/202204_anom.nc", "anom", "anom", returnx=TRUE)
+ga1
 
 ```
