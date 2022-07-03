@@ -1,6 +1,7 @@
 if (!require("curl")) install.packages("curl"); library(curl)
 if (!require("magrittr")) install.packages("magrittr"); library(magrittr)
 if (!require("data.table")) install.packages("data.table"); library(data.table)
+if (!require("sf")) install.packages("sf"); library(sf)
 if (!require("stars")) install.packages("stars"); library(stars)
 if (!require("abind")) install.packages("abind"); library(abind)
 if (!require("dplyr")) install.packages("dplyr"); library(dplyr)
@@ -11,7 +12,12 @@ if (!require("ggExtra")) install.packages("ggExtra"); library(ggExtra)
 if (!require("viridis")) install.packages("viridis"); library(viridis)
 if (!require("RColorBrewer")) install.packages("RColorBrewer"); library(RColorBrewer)
 if (!require("gridExtra")) install.packages("gridExtra"); library(gridExtra)
-if (!require("rnaturalearth")) install.packages("rnaturalearth"); library(rnaturalearth)
+if (!require("rnaturalearth")) {
+  if (!require("devtools")) install.packages("devtools"); library(devtools)
+  devtools::install_github("ropensci/rnaturalearthhires")
+  install.packages("rnaturalearth") 
+  library(rnaturalearth)
+}
 
 # plot functions the same as R/01-1_OISST_monthly.Rmd (but modify plot and panel margins)
 gplotx <- function(z, var="sst", returnx=FALSE, minz=NA_real_, maxz=NA_real_, no_coord=FALSE, fillopts="D", xlab=NULL, ylab=NULL, maxlim=360, legend_pos="bottom", legend_label=var, legend_direction="horizontal") {
@@ -119,3 +125,63 @@ gplotx <- function(z, var="sst", returnx=FALSE, minz=NA_real_, maxz=NA_real_, no
   if (returnx) {return(gx)}
   gx
 }
+
+#202207 add to modify SST anomaly color bar to match its scale (near zero)
+plot_anom <- function(file, var="anom", name=var, returnx=FALSE, 
+                      minz=-4, maxz=6) { #code the same as 01_OISST_data.Rmd
+  xt <- read_stars(file)
+  names(xt)[1] <- var
+  z <- xt %>% dplyr::select(var) %>% adrop 
+  da <- as.data.frame(z)
+  #colnames(da)[3] <- var
+  zcol <- grep(var, colnames(da))
+  da[,zcol] <- unclass(da[,zcol])
+  
+  anom.colors <-
+    colorRampPalette(c("#00007F", "blue", "#007FFF", "#00d0ff", "#83e6fc", "white", 
+                       "yellow", "#FF8800", "#ff5e00", "#ff3700", "red", "#7F0000"))
+  ga <- ggplot() +  
+    geom_tile(data=da, aes_string(x="x", y="y", fill=var), alpha=0.8) + 
+    xlab(NULL) + ylab(NULL)
+  
+  ga <- ga + 
+    coord_sf() + 
+    scale_x_continuous(limits = c(0, 360), expand = c(0, 0)) + 
+    scale_y_continuous(limits = c(-90, 90), expand = c(0, 0)) +
+    scale_fill_gradientn(toupper(var), colors = anom.colors(16), limits=c(minz, maxz),
+                         breaks=c(-4.0, -2.0, -1.5, -1.0, -0.5, 0, 0.5, 1.0, 1.5, 2.0, 4.0, 6.0))
+  
+  ga <- ga + 
+    ggExtra::removeGrid(x=TRUE, y=TRUE) +
+    theme(
+      panel.background = element_blank(), 
+      panel.border = element_rect(colour = "black", fill=NA, size=0.75),
+      panel.grid.major.x = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor = element_blank(),
+      plot.margin = unit(c(0,0,0,0), "cm"),
+      panel.spacing = unit(0,"cm"),
+      strip.background = element_blank(),
+      strip.text.y = element_text(angle = 0),
+      axis.text.x  = element_text(family = "sans"),
+      axis.title.x = element_text(family = "sans"),
+      axis.title.y = element_text(family = "sans"),
+      axis.text.y = element_text(family = "sans"),
+      legend.key = element_blank(),
+      legend.key.size = unit(0.6,"line"),
+      legend.box.background = element_blank(),
+      legend.title = element_text(size=10),
+      legend.text =  element_text(family = "sans", size=6),
+      legend.background = element_rect(fill = "transparent", colour = "transparent"),
+      legend.direction="horizontal",
+      legend.key.height = unit(0.2, 'cm'),
+      legend.key.width = unit(1.5, 'cm'),
+      legend.position = "bottom"
+    )
+  if (returnx) {return(ga)}
+  ga
+}
+
+
+
+
