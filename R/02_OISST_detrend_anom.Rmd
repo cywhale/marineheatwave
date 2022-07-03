@@ -391,6 +391,14 @@ gzk<- plot_anom(paste0("../data_src/oisst/monthly_anom_detrend/", 2020, "06", "_
                 returnx=TRUE)  
 gz <- gplotx(z, "anom", minz = -6, maxz = 16.5, returnx=TRUE)  
 ```
+
+```{r plot_for_report_anomaly, warning=FALSE, message=FALSE, results='hide', fig.height=29.4, fig.width=9.8}
+ga <- plot_anom(paste0("../data_src/oisst/monthly_anom_detrend/", 2022, "04", "_anom.nc"), #zk,
+                "anom", #minz = -8, maxz = 11.0, 
+                returnx=TRUE) 
+ga
+```
+
 ``` {r plot_result_calculate_anomaly, warning=FALSE, message=FALSE, results='hide', fig.height=29.4, fig.width=9.8}
 layt <- rbind(c(1,1),c(2,2),c(3,3))
 grid.arrange(gyk, gzk, gz, layout_matrix=layt)
