@@ -1,0 +1,654 @@
+---
+title: "Evaluate thermal displacement under marine heatwaves"
+author: "cywhale"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    self-contained: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(tidy = FALSE)
+options(htmltools.dir.version = FALSE)
+options(useFancyQuotes = FALSE)
+source("00_OISST_include_plotx.R")
+```
+
+R code modified from https://github.com/mjacox/Thermal_Displacement/blob/master/thermal_displacement.m
+
+Note: "00_OISST_include_plotx.R" contains included library and gplotx function in previous Rmd files.
+
+```{r pretest_thermal_displace, warning=FALSE, message=FALSE, results='hide'}
+if (!require("sp")) install.packages("sp"); library(sp)
+if (!require("sf")) install.packages("sf"); library(sf)
+
+hdt <- read_stars("../data_src/oisst/monthly_heatwave_detrend/202002_heatwave.nc") %>% as.data.table() %>%
+.[,`:=`(lng=fifelse(x>180, x-360, x), lat=y)] %>% .[,.(lng, lat)]
+latx0 <- sort(unique(hdt$lat))
+lngx0 <- sort(unique(hdt$lng))
+Detrend <- TRUE ## selece result in monthly_heatwave_detrend
+RE <- 6371 #km of Earth radius
+res <- lngx0[2]-lngx0[1]
+bbox= c(115.0, 20.0, 135.0, 35.0) #c(-180.0, -90.0, 180.0, 90.0) #first try a smaller bounding box
+grd_x <- res
+grd_y <- res
+
+lngx1 <- seq(as.integer(-360*1000+grd_x*1000),
+as.integer(360*1000-grd_x*1000), by=as.integer(grd_x*1000))/1000.0
+latx1 <- rev(seq(as.integer(-90*1000+(grd_x/2)*1000),
+as.integer(90*1000), by=as.integer(grd_x*1000))/1000.0)
+res
+lngxt <- sort(fifelse(lngx0<0, lngx0+360, lngx0))
+latxt <- rev(latx0) #in NetCDF, lat is from 89.875 to -89.875
+#lngxt
+#latxt
+
+dt <- fread("unzip -p ../data_src/mapfiles/sea_icemask_025d.csv.zip")
+#dt
+setorder(dt, -y, x)
+dt[,ry:=rowid(x)] ## NOTE that in OISST.nc file, y is from Northest (89.875) to Southest (-89.875)
+#################### Actually, x is 0-360 in nc so is 0-180 -180-0 arranged
+mask <- dcast(dt, x ~ ry, value.var = "seamask")[,-1] %>% as.matrix()
+mlon <- dcast(dt, x ~ ry, value.var = "lon")[,-1] %>% as.matrix()
+mlat <- dcast(dt, x ~ ry, value.var = "y")[,-1] %>% as.matrix()
+
+if (Detrend) {
+  indir <- "../data_src/oisst/monthly_heatwave_detrend/"
+  andir <- "../data_src/oisst/monthly_anom_detrend/"
+} else {
+  indir <- "../data_src/oisst/monthly_heatwave/"
+  andir <- "../data_src/oisst/monthly_anom/"
+}
+
+td_max = 3000 # km
+latn <- length(latx1) #dim(dm)[2] #720
+dlon <- length(lngx1) #dim(dm)[3] #2879 (difference of longitude)
+lonn <- dim(mask)[1] #1440
+
+yrng <- seq(1982,2022)
+endt <- "2022-05-22"
+trackdate <- seq.Date(as.IDate(endt)-6, as.IDate(endt), by="day")
+curryr <- year(as.IDate(endt))
+currmo <- month(as.IDate(endt))
+
+setkey(dt, x, y) #Note it would reorder dt to increasing y, and note that in dt, longitude is "lon" (old version is "lng")
+rowGrp <- 3L
+
+sf::sf_use_s2(FALSE) #Error in s2_geography_from_wkb(x).... in ppp_estimator(), for newer sf version
+plan(multisession)
+options(future.globals.maxSize= 1048576000*2)
+```
+
+``` {r coast_polygon, warning=FALSE, message=FALSE, results='hide'}
+if (!require("raster")) install.packages("raster"); library(raster)
+Rerasterize <- FALSE
+if (Rerasterize) {
+  sp_coast <- ne_coastline() ## for ppp analysis, to check result
+# for 0-360 degree, not break whole contour, so require a continuous world...
+# https://gis.stackexchange.com/questions/266535/change-a-raster-from-longitude-display-180-180-to-0-360
+  sx <- raster::rasterize(sp_coast, raster::raster())
+  x1 <- crop(sx, extent(-180, 0, -90, 90))
+  x2 <- crop(sx, extent(0, 180, -90, 90))
+  x3 <- copy(x1)
+  extent(x1) <- c(180, 360, -90, 90)
+  mcoa <- merge(x3, x1, x2)
+  save(mcoa, file="../data_src/mapfiles/coast_extend.RData")
+} else {
+  load(file="../data_src/mapfiles/coast_extend.RData")
+}
+plot(mcoa) #if want to plot in ppp_estimator, argument 'coast'=mcoa
+
+```
+
+```{r ppp_estimator, warning=FALSE, message=FALSE, results='hide'}
+if (!require("spatstat")) install.packages("spatstat"); library(spatstat)
+if (!require("maptools")) install.packages("maptools"); library(maptools)
+if (!require("rgeos")) install.packages("rgeos"); library(rgeos)
+if (!require("ggrepel")) install.packages("ggrepel"); library(ggrepel)
+if (!require("geojsonsf")) install.packages("geojsonsf"); library(geojsonsf)
+
+## Null parameter in vector check
+has_val <- function(x) {
+  if(is.null(x)) return(FALSE)
+  if(!length(x)) return(FALSE)
+  if(is(x, "data.frame")) return(nrow(x)>0) #"data.frame" %chin% class(x)
+  if(is.list(x)) x<-unlist(x, use.names = FALSE)
+  return(any(na.omit(x)!="") & any(!is.na(x)))
+}
+
+is_miss <- function(x) {!has_val(x)}
+
+# code from odbapi::intersect_polyx/cywhale
+intersect_poly <- function(site, poly, xy=c("longitude", "latitude"), polyid=NA, onlyInPoly=TRUE, crs=4326) {
+  sitex <- st_as_sf(site, coords = xy, crs = crs, remove = FALSE)
+  sjt <- st_intersects(sitex[,c(xy, "geometry")], poly)
+  setDT(sitex)[,overlap:=sapply(sjt, function(x) if(length(x)>1) {length(x)} else {1}, simplify = TRUE)][
+    ,hx:=sapply(sjt, function(x) if(length(x)) {x} else {NA}, simplify = TRUE)
+    ][,idtstx:=.I]
+  dt <- sitex[rep(1:.N, overlap)][, gid:=NA_integer_][ #### Handle overlapping polygons
+    !is.na(hx), gid:=as.integer(hx[[rleid(idtstx)]]), by=.(idtstx)
+    ][,`:=`(hx=NULL, geometry=NULL, idtstx=NULL)]
+
+  if (onlyInPoly) dt <- dt[!is.na(gid),]
+  if (is_miss(polyid)) return(dt)  #### no specify which poly id in poly, return index of rows in poly
+
+  xpoly <- polyid[1]
+  if (xpoly %chin% colnames(poly)) { #### if polyid is colnames in poly, return actural polyid by polyid[gid]
+    dt[!is.na(gid), (xpoly):=get(xpoly, poly)[gid]][,gid:=NULL]
+    return(dt)
+  }
+  if (any(grep("id", colnames(poly)))) { #### if polyid only a desired colnames, not in poly, try to return poly$id[gid]
+    idx <- colnames(poly)[grep("id", colnames(poly))[1]]
+    dt[!is.na(gid), (xpoly):=get(idx, poly)[gid]][,gid:=NULL]
+    return(dt)
+  }
+  setnames(dt, chmatch("gid", colnames(dt)), xpoly)
+  return(dt) #### othewise, return index of rows in poly, change the name "gid" to desired polyid
+}
+
+jet.colors <-
+  colorRampPalette(c("#00007F", "blue", "#007FFF", "cyan",
+                     "#7FFF7F", "yellow", "#FF7F00", "red", "#7F0000"))
+
+ppp_estimator <- function(yr, mon, tdf=NULL, heatwave=NULL, coast=NULL, xPlot=FALSE, xGjson=TRUE) {
+  #yr=2004; mon=4; tdf=NULL; heatwave=NULL; coast=mcoa; xPlot=TRUE; xGjson=TRUE; #for debugging
+  jt <- as.integer(mon)
+  mon <- fifelse(jt<10, paste0("0",jt), paste0(jt))
+  if (is.null(tdf)) {
+    tdf <- paste0("../data_src/oisst/monthly_td/", yr, mon, "_td.csv")
+  }
+  if (is.character(tdf)) {
+    if (!file.exists(tdf)) {
+      print(paste0("Fail to output Year-month: ", yr," - ", mon, " because input file: ", tdf, " not exist!!"))
+      return(NULL)    
+    }
+     zt <- fread(tdf) %>% .[td_flag==TRUE, .(lng, lat, sst, anom, xd, yd, sst_dis, ddis)] 
+  } else if (is.data.frame(tdf)) {
+    zt <- setDT(tdf)[td_flag==TRUE, .(lng, lat, sst, anom, xd, yd, sst_dis, ddis)]
+  } else {
+    print(paste0("Fail to output Year-month: ", yr," - ", mon, " because input file or data not exist!!"))
+    return(NULL)    
+  }
+
+## Heatwaves occurs at zc with its sst, but copy a lng<0 to 180-360, make it extend from -180 - 0 - 180 - 360    
+  zt[,`:=`(rowid=.I)]
+  zcm <- zt[lng<0, .(lng, lat, sst, rowid)]
+  zc1 <- zt[,.(lng, lat, sst, anom, rowid)] 
+  zc <- st_as_sf(rbindlist(list(zc1[,.(lng,lat,sst,rowid)] %>% .[,lng:=fifelse(lng<0, lng+360, lng)], zcm), use.names = T), coords=c("lng", "lat"))
+  #st_crs(zc) <- 4326
+  ptc<- as.ppp(zc)
+  Window(ptc) <- owin(xrange=c(-180,360), yrange=c(-90,90))
+  kzc <- density(ptc, sigma=15,  kernel = "quartic", adjust = 0.2, cut=6) #, ext=extent(x))
+  kzct <- copy(kzc)
+  thre_kzc <- as.integer(quantile(kzc[kzc>=3])[4]) #75% = 3/4 quantile 
+  if (thre_kzc>=5) {
+    kzct[kzct<5] <- NA
+  } else {
+    #kzct[kzct<thre_kzc] <- NA
+    #kzct[kzct<as.numeric(quantile(kzc[kzc>=3])[3])] <- NA #50% = median
+    kzct[kzct<3] <- NA #too less kzct will cause contour not closed and make PolyC NULL
+  }
+
+## Thermal displacement candidates occurs at zh with its sst (sst_dis)    
+  zhm <- zt[xd<0, .(xd, yd, sst_dis, rowid)] %>% setnames(1:3, c("lng","lat","sst"))
+  zh1 <- zt[,.(xd, yd, sst_dis, ddis,rowid)] %>% setnames(1:3, c("lng","lat","sst"))
+  zh <- st_as_sf(rbindlist(list(zh1[,.(lng,lat,sst,rowid)] %>% .[,lng:=fifelse(lng<0, lng+360, lng)], zhm), use.names = T), coords=c("lng", "lat"))
+  pth<- as.ppp(zh)
+  Window(pth) <- owin(xrange=c(-180,360), yrange=c(-90,90))
+  kzh <- density(pth, sigma=15,  kernel = "quartic", adjust = 0.2, cut=6)
+  kzht <- copy(kzh)
+  if (thre_kzc>=5) {
+    kzht[kzht<5] <- NA
+  } else {
+    #kzht[kzht<thre_kzc] <- NA
+    #kzht[kzht<as.numeric(quantile(kzh[kzh>=3])[3])] <- NA #50% = median
+    kzht[kzht<3] <- NA
+  }
+
+  if (xPlot) {
+    plot(kzc, main=NULL, las=1, box=FALSE,axes=FALSE, ribbon =FALSE, useRaster=FALSE, xlim=c(-180,360), ylim=c(-90,90))
+    contour(kzct, nlevels = 6, col="red", add=T) 
+    contour(kzht, nlevels = 6, col="green",add=T) 
+    if (!is.null(coast)) plot(coast, col="grey", add=T, legend=F, axes=F, box=F)
+    abline(h=0, col="lightgrey", lty=2, lwd=1)
+  }
+  #--------------------------------------------------------------------
+  ## thermal displacement, need extend -180 - 180 - 360 to do raster analysis
+
+  gzc <- as(kzct, "SpatialGridDataFrame")  # convert to spatial grid class
+  igzc<- as.image.SpatialGridDataFrame(gzc)  # convert again to an image
+  cgzc <- contourLines(igzc, nlevels = 6)  # create contour object - change 8 for more/fewer levels
+  sldc <- ContourLines2SLDF(cgzc, #proj4string= CRS("+init=epsg:4326")) #got the same as CRS(+proj=...)
+                            CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"))  # convert to SpatialLinesDataFrame
+  
+  gzh <- as(kzht, "SpatialGridDataFrame")  # convert to spatial grid class
+  igzh<- as.image.SpatialGridDataFrame(gzh)  # convert again to an image
+  cgzh <- contourLines(igzh, nlevels = 6)  # create contour object - change 8 for more/fewer levels
+  sldh <- ContourLines2SLDF(cgzh, CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"))  # convert to SpatialLinesDataFrame
+
+  Polyc <- rgeos::gPolygonize(sldc[-1, ])
+  gac <- gArea(Polyc, byid = T)/10000
+  Polyc <- SpatialPolygonsDataFrame(Polyc, data = data.frame(gac), match.ID = F)
+  sf1 <- st_as_sf(Polyc) %>% st_union()
+  
+  Polyc2 <- gPolygonize(sldh)
+  gah <- gArea(Polyc2, byid = T)/10000
+  Polyc2 <- SpatialPolygonsDataFrame(Polyc2, data = data.frame(gah), match.ID = F)
+  sf2 <- st_as_sf(Polyc2) %>% st_union()
+
+  if (xPlot) {
+    plot(sldc, col = heat.colors(8), main=NULL, las=1, axes=FALSE, xlim=c(-180,360), ylim=c(-90,90)) #add=T
+    plot(sldh, col = terrain.colors(8), add=T)
+    plot(sf1, col="#F8766D80", main=NULL, las=1, axes=FALSE, xlim=c(-180,360), ylim=c(-90,90), add=T)
+    plot(sf2, col="#00BFC480", add=T) #Polyc2
+    #plot(cen1, col="red", pch=10, add=T)
+    #plot(cen2, col="green", pch=7, add=T)
+    #abline(h=0, col="lightgrey", lty=2, lwd=1)
+  }
+
+  sf1x <- st_cast(sf1, "POLYGON") %>% st_sf(geom = .)
+  sf2x <- st_cast(sf2, "POLYGON") %>% st_sf(geom = .)
+  
+  ## Use sf, geojson output
+  xrng <- c(-90, 270) #c(0.360)
+  sflct <- st_as_sf(sldc, dim = "XY", crs=4326) %>% st_crop(xmin=xrng[1], ymin=-90, xmax=xrng[2], ymax=90) ##%>% ## clip [0, 360] range
+    # sflc$geometry <- (st_geometry(sflc) + c(360,90)) %% c(360) - c(0,90) 
+    #sf::st_wrap_dateline(options = c("WRAPDATELINE=YES", "DATELINEOFFSET=180"))
+  sflc <- lapply(1:nrow(sflct), function(x) {
+    #sftx <- st_cast(sflct[x,], "MULTILINESTRING")
+    #sf::st_wrap_dateline(sftx, options = c("WRAPDATELINE=YES", "DATELINEOFFSET=180"))
+    sf::st_wrap_dateline(sflct[x,], options = c("WRAPDATELINE=YES", "DATELINEOFFSET=180")) %>%
+        st_cast("MULTILINESTRING") %>% st_zm
+  }) %>% do.call(rbind, .)
+  st_crs(sflc) <- 4326
+  
+  sflht <- st_as_sf(sldh, dim = "XY", crs=4326) %>% st_crop(xmin=xrng[1], ymin=-90, xmax=xrng[2], ymax=90) #%>%
+    #sf::st_wrap_dateline(options = c("WRAPDATELINE=YES", "DATELINEOFFSET=180"))
+  sflh <- lapply(1:nrow(sflht), function(x) {
+    sf::st_wrap_dateline(sflht[x,], options = c("WRAPDATELINE=YES", "DATELINEOFFSET=180")) %>%
+        st_cast("MULTILINESTRING") %>% st_zm
+  }) %>% do.call(rbind, .)
+  st_crs(sflh) <- 4326
+  
+  sf1y <- sf1x %>% #st_crop(xmin=xrng[1], ymin=-90, xmax=xrng[2], ymax=90) %>%
+    sf::st_wrap_dateline(options = c("WRAPDATELINE=YES", "DATELINEOFFSET=180"))
+  sf2y <- sf2x %>% #st_crop(xmin=xrng[1], ymin=-90, xmax=xrng[2], ymax=90) %>%
+    sf::st_wrap_dateline(options = c("WRAPDATELINE=YES", "DATELINEOFFSET=180"))
+
+  cen1 <- st_centroid(sf1x) #dim(sf1x) is n x 1 #Note that use continous sf1x, not sf1y(who take cake dateline)
+  cen2 <- st_centroid(sf2x) #dim(sf2x) is m x 1
+  
+  if (FALSE) { #only Debug needed
+    xrng = range(c(st_coordinates(cen1)[,1], st_coordinates(cen2)[,1]))
+    yrng = range(c(st_coordinates(cen1)[,2], st_coordinates(cen2)[,2]))
+    plot(coast, col="grey", legend=F, axes=F, box=F, xlim=c(floor(xrng[1]), floor(xrng[2]+1)), ylim=c(floor(yrng[1])-1, floor(yrng[2]+1)+1)) #add=T, 
+    plot(sf1x, border="#F8766D80", xlim=c(floor(xrng[1]), floor(xrng[2]+1)), ylim=c(floor(yrng[1]), floor(yrng[2]+1)), add=T)
+    text(st_coordinates(cen1), labels=seq_along(1:nrow(cen1)), col="red", cex=0.75)
+    plot(sf2x, border="#00BFC480", add=T)
+    text(st_coordinates(cen2), labels=seq_along(1:nrow(cen2)), col="blue", cex=0.75, adj = c(0, 1))
+  }
+  
+  # st_nearest_feature auto conver long>180 to neg, and can be diff with nrx-> nmin result but still resonable
+  # nrx <- st_nearest_feature(cen1, cen2) ## cannot solve bug GEOS has differ version in Linking (3.7.1) & runtime (3.4.2)
+  nrx <- st_distance(cen1, cen2)  #dim(nrx) is nxm (distance matrix)
+  nmin<- apply(nrx, 1, which.min) #BY ROW, length(nmin) = n; means which cen2 of sf2x (sst_displacement, DIS) has min distance to each cen1 (heatwaves, HW) of sf1x
+  mmin0 <- apply(nrx, 2, which.min) #BY Column, means which cen1 (heatwaves, HW) has min distance to each cen2 (displacement, DIS)
+  xmin<- mmin0
+  xmin[nmin]<- seq_along(nmin) # if cen1(n) -> cen2(m) can multiple-to-1 but should not 1-to-multiple
+  # Basically, we want to find which DIS has min dist to HW, multple HW can assign to the same DIS. 
+  ############################################################################################################
+  #cen1=      #nmin=      | #cen2 #mmin0 #xmin[nmin] xmin is a new estimator for cen1, 
+  #seq_along( #which.min  | #1    #25    #xmin[2]  <- 1 
+  #nmin)      # of m cell | #2    #1     #xmin[22] <- 2
+  #1          # 2         | #.....................   
+  #2          # 22        | #............#xmin[47] <- n     
+  #.......................| #m    #23 
+  #n          # 47        | 
+  ############# e.g min distance of (HW, DIS) is (1, 2)  then we replace xmin[2] <- 1, so (DIS, HW) is (2, 1)         
+  ############# e.g min distance of (HW, DIS) is (2, 22) then we replace xmin[22]<- 2, so (DIS, HW) is (22,2)
+  # other not replaced in xmin is originally filled by mmin0, so we got some (DIS, with some duplicated HW)
+  # so unique(xmin[which(duplicated(xmin))] get those duplicated HW by unique <- smaller duplicated index, that is filled by seq_alon(nmin)
+  # then fetch value by nmin[some of seq_alon(nmin) caused from duplicated HW] === which.min of DIS cells to HW, as  DUP2
+  # then unqiue(sort(NOT_DUP, DUP2))
+  
+  if (any(duplicated(xmin))) {
+    munq <- unique(sort(c(which(!duplicated(xmin)), nmin[unique(xmin[which(duplicated(xmin))])]))) # select unique xmin, Note: xmin content is n, but munq is index of xmin
+  } else {
+    munq <- seq_along(xmin)
+  } # still will have duplicated(xmin[munq])
+
+  #zht <- copy(zh1)[,lng:=fifelse(lng<0, lng+360, lng)] #Nope, sf2x extend from -180 to 360 not only (0,360)
+  mply <- intersect_poly(zh1, sf2y[munq,], xy=c("lng", "lat"), polyid=NA, onlyInPoly=TRUE, crs=4326)
+  mply[,gid:=munq[gid]][,overlap:=NULL]
+  mmed <- mply[!is.na(gid), .(dmed=median(ddis)), by=.(gid)][,`:=`(nid=xmin[gid])]
+  jy <- xmin[munq]
+  if (any(duplicated(jy))) {
+    jm <- c(which(duplicated(jy)), which(duplicated(jy, fromLast = TRUE))) #index to xmin[munq] which is duplicated in its content (n)
+    selm <- mmed[nid %in% jy[jm], .(selm=gid[which.min(dmed)]), by=.(nid)]$selm
+    mmed <- mmed[gid %in% sort(c(munq[seq_along(jy)[-jm]], selm)),]
+  }
+  nunq <- sort(unique(mmed$nid))
+  nply <- #odbapi::intersect_polyx
+          intersect_poly(zc1, sf1y[nunq,], xy=c("lng", "lat"), polyid=NA, onlyInPoly=TRUE, crs=4326)
+  nply[,`:=`(nid=nunq[gid])][,`:=`(overlap=NULL, gid=NULL)] 
+  
+  setnames(mply, 1:3, c("xd","yd","sst_dis"))
+  mnx <- merge(mmed, merge(mply, nply, by=c("rowid"), all.x=T) %>% .[!is.na(nid),], # & sst>sst_dis,] <- MUST BE
+               by=c("gid","nid"), all=T) %>% .[!is.na(dmed),] %>% .[ ## just find an example in each (gid, nid)
+    ,.(lng=lng[which.max(ddis)], lat=lat[which.max(ddis)],
+       sst=sst[which.max(ddis)], anom=anom[which.max(ddis)],
+       xd=xd[which.max(ddis)], yd=yd[which.max(ddis)],
+       sst_dis=sst_dis[which.max(ddis)], ddis=ddis[which.max(ddis)]), by=.(gid, nid, dmed)] 
+  mnx[,`:=`(xm1=fifelse(sign(lng)*sign(xd) == -1 & (abs(lng)>150 | abs(xd)>150), fifelse(sign(lng) == -1, -180.0, 180.0), NA_real_), ym1=0.5*(lat+yd))][
+      ,`:=`(xm2=fifelse(sign(lng)*sign(xd) == -1 & (abs(lng)>150 | abs(xd)>150), fifelse(sign(lng) == -1, 180.0, -180.0), NA_real_), ym2=ym1)]  
+  
+  sfl1 <- copy(sflc)
+  #sfl$level <- rev(as.integer(as.character(sflc$level))) - min(as.integer(as.character(sflh$level)))
+  sfl1$level <- c(1:nrow(sflc))
+  sfl1 <- st_zm(sfl1)
+   
+  sfl2 <- copy(sflh)
+  #sfl2$level <- as.integer(as.character(sfl2$level))
+  sfl2$level <- c(1:nrow(sflh)) + 16 - nrow(sflh) #16 or 11 is the number or color palette allowed
+  sfl2 <- st_zm(sfl2)
+  sfl <- rbind(sfl1, sfl2)
+
+  if (xPlot) {
+    if (is.null(heatwave)) {
+      heatwave <- read_stars(paste0("../data_src/oisst/monthly_heatwave_detrend/", yr, mon, "_heatwave.nc"))
+      names(heatwave)[1] <- "heatwave"      
+    }
+    ht <- as.data.table(heatwave) %>% 
+      .[,`:=`(longitude=fifelse(x>180, x-360, x), latitude=y)] %>% .[,.(longitude, latitude, heatwave)]
+
+    g1 <- ggplot() +  
+      geom_point(data=ht[heatwave==1,], aes_string(x="longitude", y="latitude"), alpha=0.65, col="gold", size = 0.01, stroke = 0, shape = 16) +
+      #geom_point(data=zc1, aes(x=lng, y=lat), alpha=0.75, col="orange", size = 0.01, stroke = 0, shape = 16) + 
+      geom_point(data=zh1, aes(x=lng, y=lat), alpha=0.75, col="purple", size = 0.01, stroke = 0, shape = 16) + 
+      geom_sf(data = ne_coastline(scale = "large", returnclass = "sf"), color = 'darkgray', size = .3) +
+      geom_sf(data = sfl, aes(color=level)) + #factor(level)
+      ##scale_colour_brewer(palette = "RdYlBu") +
+      ##scale_colour_brewer(palette = "RdYlBu", direction = -1) +
+      scale_colour_gradientn(colours=rev(jet.colors(16))) +  
+      #geom_sf(data = sf1y, fill="#F8766D80", color="#F8766D80", alpha=0.5) + 
+      geom_sf(data = sf2y, fill="#00BFC480", color="#00BFC480", alpha=0.5) +
+      guides(fill="none", color="none") + coord_sf() + #xlim(c(-180, 180)) + ylim(c(-90, 90)) +
+      scale_x_continuous(limits = c(-180, 180), expand = c(0, 0)) + 
+      scale_y_continuous(limits = c(-90, 90), expand = c(0, 0)) +
+      labs(x="Longitude",y="Latitude") +
+      theme(
+        panel.background = element_rect(fill="white"),
+        panel.border = element_rect(colour = "black", fill=NA, size=0.75),
+        panel.grid.major = element_line(colour = "lightgrey"),
+        panel.grid.minor = element_line(colour = "lightgrey"),
+        strip.background = element_blank(),
+        strip.text.y = element_text(angle = 0),#,face = "italic"),
+        legend.background = element_rect(fill = "transparent", colour = "transparent"),#, #"white"),
+        legend.position = NULL
+      )
+    
+    if (nrow(mnx)>0) {
+      if (any(!is.na(mnx$xm1))) {
+        g1 <- g1 +
+          geom_segment(data=mnx[!is.na(xm1),], aes(x=lng, xend=xm1, y=lat, yend=ym1), size = 0.75, color="purple") + #, color=factor(seamask)
+          geom_segment(data=mnx[!is.na(xm1),], aes(x=xm2, xend=xd, y=ym2, yend=yd), size = 0.75, arrow = arrow(length = unit(0.08, "cm")), color="purple") + 
+          geom_segment(data=mnx[is.na(xm1),], aes(x=lng, xend=xd, y=lat, yend=yd), size = 0.75, arrow = arrow(length = unit(0.08, "cm")), color="purple") + 
+          geom_text_repel(data=mnx[!is.na(xm1),], aes(x=xd, y=yd, label=paste0(round(ddis,0), " km")), color = "black", size=3, hjust=1, vjust=1) + #geom_text
+          geom_text_repel(data=mnx[is.na(xm1),], aes(x=0.5*(lng+xd), y=0.5*(lat+yd), label=paste0(round(ddis,0), " km")), color = "black", size=3, hjust=1, vjust=1)
+      } else {
+        g1 <- g1 +
+          geom_segment(data=mnx, aes(x=lng, xend=xd, y=lat, yend=yd), size = 0.75, arrow = arrow(length = unit(0.08, "cm")), color="purple") + 
+          geom_text_repel(data=mnx, aes(x=0.5*(lng+xd), y=0.5*(lat+yd), label=paste0(round(ddis,0), " km")), color = "black", size=3, hjust=1, vjust=1) 
+      }
+    }
+    #dev.off()
+    #g1
+  }  
+  # ==== Output as geojson
+  if (xGjson) {
+    outdir <- "../data_src/oisst/thermal_displace/"
+    sfc1 <- st_as_sf(zc1[,.(sst, anom, lng, lat)], coords=c("lng", "lat"), crs=4326) ## add sst anom too big for geojson 15Mb
+    jfc1 <- sf_geojson(sfc1)
+    geojson_write(jfc1, file = paste0(outdir, yr, mon, "_hwv_occ.geojson"))
+    
+    sfc2 <- st_as_sf(zh1[,.(sst, ddis, lng, lat)], coords=c("lng", "lat"), crs=4326) ## add sst anom too big for geojson 15Mb
+    jfc2 <- sf_geojson(sfc2)
+    geojson_write(jfc2, file = paste0(outdir, yr, mon, "_hwv_dis.geojson"))
+
+    geojson_write(sf_geojson(sflc), file = paste0(outdir, yr, mon, "_hwv_occ_contour.geojson"))
+    geojson_write(sf_geojson(sflh), file = paste0(outdir, yr, mon, "_hwv_dis_contour.geojson"))
+    
+    sf1d <- st_as_sf(data.frame(ID=seq_along(sf1y), geometry=st_geometry(sf1y)), crs=4326)
+    sf2d <- st_as_sf(data.frame(ID=seq_along(sf2y), geometry=st_geometry(sf2y)), crs=4326)
+    geojson_write(sf1d, file = paste0(outdir, yr, mon, "_hwv_occ_poly.geojson"))
+    geojson_write(sf2d, file = paste0(outdir, yr, mon, "_hwv_dis_poly.geojson"))
+    
+    if (nrow(mnx)>0) {
+      mnxf <- st_as_sf(mnx, coords=c("lng", "lat"), crs=4326)
+      geojson_write(mnxf, file = paste0(outdir, yr, mon, "_hwv_dis_correspond.geojson"))
+    } else {
+      print(paste0("Warning: No displacement vector in: ", yr, "-", mon))
+    }
+  }
+  print(paste0("Successfully output Year-month: ", yr," - ", mon, " geojson for thermal displacement"))
+  if (xPlot) {
+    return(g1)
+  }
+}
+
+apply_oisst_masks <- function(ii, jj, d_mask) { #, mask, mlat, mlon) {
+# ====================================================
+# Inputs:
+#       ii: longitude index on OISST grid
+#       jj: latitude index on OISST grid
+#       d:  matrix of distances to all other OISST grid cells
+#           from point [ii, jj]. Dimensions are [lon lat]
+#       mask: mask defining regions, created by make_oisst_masks.m
+#             Dimensions are [lon lat]
+#       lat:  Matrix of OISST latitudes
+#       lon:  Matrix of OISST longitudes
+# Output:
+#       d_mask: matrix of distances with unavailable locations masked out
+  # d_mask <- d
+  # Exclude ice-surrounded areas
+  d_mask[mask==3] <- NA_real_
+  if (!is.na(mask[ii, jj])) {
+    maskij <- letters[as.integer(mask[ii, jj])]
+    # Handle regional cases
+    switch(maskij,
+           d = { d_mask[mask != 4] <- NA_real_ }, # maskij ==  4
+           e = { d_mask[mask != 5] <- NA_real_ }, # maskij ==  5
+           f = {
+             d_mask[mask<=5 | mask==7 | mask==8 | mlat>48 | (mlat>43 & mlon>351)] <- NA_real_
+             if (mlon[ii,jj]>12 & mlon[ii,jj]<20 & mlat[ii,jj]>42.3 & mlat[ii,jj]<46) {
+               d_mask[mask!=6] <- NA_real_
+             }
+           }, # maskij ==  6
+           g = { d_mask[!(mask==7 | mask==11)] <- NA_real_ },  # maskij ==  7
+           h = { d_mask[!(mask==8 | mask==9)] <- NA_real_ },   # maskij ==  8
+           i = { d_mask[!(mask==7 | mask==8 | mask==9 | mask==11)] <- NA_real_ }, # maskij ==  9
+           j = { d_mask[!(mask==10 | mask==11)] <- NA_real_ }, # maskij ==  10
+           k = { d_mask[(mask>=4 & mask<=6) | mask==12] <- NA_real_ }, # maskij ==  11
+           l = { d_mask[mask>=9 & mask<=11] <- NA_real_ }, # maskij ==  12
+           m = { d_mask[!(mask==13 | mask==14)] <- NA_real_ }, # maskij ==  13
+           n = { d_mask[(mask>=15 & mask<=17) | mlat>283] <- NA_real_ }, # maskij ==  14
+           o = { d_mask[mask==2 | mask==13 | mask==14 | mask==17 | mlon<260 | mlon>280] <- NA_real_ }, # maskij ==  15
+           p = { d_mask[mask==13 | mask==14 | mlon<260] <- NA_real_ }, #maskij ==  16
+           q = { d_mask[mask==15] <- NA_real_ } # maskij ==  17
+    )
+  }
+  return(d_mask)
+}
+
+```
+
+```{r calculate_displacement, warning=FALSE, message=FALSE, results='hide'}
+Recalculate_displace <- FALSE
+Rewrite_displace <- FALSE
+Reestimate <- FALSE
+
+if (Recalculate_displace) {
+
+for (i in yrng) {
+  mmx <- fifelse(i==curryr, currmo-1L, 12L)
+  for (j in 1:mmx) {
+    monj <- fifelse(j<10, paste0("0",j), paste0(j))
+    print(paste0("Now in Year-month: ", i," - ", monj, " to calculate thermal displacement"))
+    filet <- paste0("../data_src/oisst/monthly_td/", i, monj, "_td.csv")
+    if (Rewrite_displace | (!file.exists(filet))) {
+      z <- read_stars(paste0(indir, i, monj, "_heatwave.nc"))
+      names(z)[1] <- "heatwave" 
+      sst <- read_stars(paste0("../data_src/oisst/monthly_sst/", i, monj, "_sst.nc"))
+      names(sst)[1] <- "sst" 
+      anom <- read_stars(paste0(andir, i, monj, "_anom.nc"))
+      names(anom)[1] <- "anom"
+      zd <- merge(as.data.table(z) %>% setkey(x,y), dt[,.(x,y,lon,seamask)], by=c("x","y"), all=T)[
+        heatwave==1 & (is.na(seamask) | seamask >3), .(lon, y, heatwave, seamask)][
+          ,`:=`(xd=NA_real_, yd=NA_real_, ddis=NA_real_, 
+                sst=NA_real_, anom=NA_real_, sst_dis=NA_real_, td_flag=NA, 
+                rowgrp=cut(seq_len(.N), rowGrp, labels = FALSE))] #%>%
+        #.[sample.int(nrow(.), 3000),]  ## Just test performance bottelneck
+      setnames(zd, 1:2, c("lng","lat")) ## Note here change "lon" -> "lng"
+      
+      #print("Start get_tdx...")
+      get_tdx <- function(lng, lat) {
+        lngt <- fifelse(lng<0, lng+360, lng)
+        ii <- which(lngxt==lngt)
+        it <- which(lngx0==lng)
+        jt <- which(latx0==lat)
+        jj <- latn-jt+1 ## NetCDF lat in rev order
+        #if (is.na(mask[ii, jj]) | mask[ii, jj] > 3) { #z[[1]][ii, jj]==1 & () ## already check in zd[]
+          ## (old version) Note that dm (aboving), diff of lng order is reversed to match NetCDF, not the same of ref matlab
+          ## (old version use whole dm 11GB too large)
+          ## d_lat <- apply_oisst_masks(ii, jj, t(dm[jj, ,seq(it, it+lonn-1)])) #, mask, latm, lngm) #t(dm[jj, ,seq(dlon-lonn-it+2, dlon-it+1)])
+          rlng <- seq(as.integer((0.125-lngt)*1000), 
+                      as.integer((359.875-lngt)*1000), by=as.integer(grd_x*1000))/1000.0
+          #rlng <- lngx1[seq(dlon-lonn-it+2, dlon-it+1)] #seq(it, it+lonn-1)
+          #dm <- array(rep(NA_real_, length(latx1)*length(rlng)), dim=c(length(latx1),length(rlng)))
+          dm <- t(Re(RE*acos(sin(latx1[jj]*pi/180)*sin(latx1*pi/180) + 
+                             cos(latx1[jj]*pi/180)*cos(latx1*pi/180) %*% t(cos(rlng*pi/180)))))
+          # print(object.size(dm), units="Mb") ## 7.9 Mb << 11Gb !!
+          # print(paste0("After matrix multiplication: ", rowid))
+          d_lat <- apply_oisst_masks(ii, jj, dm) #, mask, latm, lngm) #t(dm[jj, ,seq(dlon-lonn-it+2, dlon-it+1)])
+          sst_norm <- sst[[1]][ii,jj] - anom[[1]][ii,jj]; # i.e. climatology, because sst - climatology = anomaly
+          d_lat[is.na(sst[[1]]) | sst[[1]]>sst_norm | d_lat>td_max] <- NA_real_;
+          idx <- which(!is.na(d_lat))
+          if (any(idx)) {
+            minidx <- which.min(d_lat[idx])
+            xt <- idx[minidx] %% lonn
+            yt <- as.integer(idx[minidx]/lonn)
+            yt <- fifelse(xt==0, yt, yt+1)
+            xt <- fifelse(xt==0, lonn, xt)
+            xx <- lngxt[xt]
+            xx <- fifelse(xx>180, xx-360, xx)
+            yy <- latxt[yt]
+            return(list(xd=xx, yd=yy, ddis=d_lat[idx[minidx]], 
+                        sst=sst[[1]][ii,jj], anom=anom[[1]][ii,jj], sst_dis=sst[[1]][xt,yt], td_flag=TRUE)) #]
+          } else {
+            return(list(xd=NA_real_, yd=NA_real_, ddis=NA_real_, 
+                        sst=sst[[1]][ii,jj], anom=anom[[1]][ii,jj], sst_dis=NA_real_, td_flag=FALSE)) #]
+          }
+        #}
+      }
+      
+      #for (ii in seq_along(lngx0)) {
+      #  for (jj in seq_along(latx0)) {
+      zdx <- rbindlist(future_lapply(seq_len(rowGrp), function(grp) {
+        x <- zd[rowgrp==grp, ]
+        return(
+          x[,c("xd", "yd", "ddis", "sst", "anom", "sst_dis", "td_flag"):=get_tdx(lng, lat), by = 1:nrow(x)] 
+        )
+      }), use.names = TRUE, fill = TRUE)
+      #} #use rowGrp =3 with future_lapply for nrow=3000 user  system elapsed 0.742   0.033  70.476 
+         #use rowGrp =4 for nrow=3000  user  system elapsed 0.867   0.048  60.149 
+         #For one month data 1400x720 rows need  user   system  elapsed 21.244    1.086 3309.989 
+      #zd[#heatwave==1 & (is.na(seamask) | seamask >3)
+      #  , c("xd", "yd", "ddis", "sst", "anom", "sst_dis", "td_flag"):=get_tdx(lng, lat, rowid), by = 1:nrow(zd)] #by=.(lng, lat)]
+      setkey(zdx, lng, lat)
+      fwrite(zdx[,rowgrp:=NULL], file= filet)
+      #} #for-loop is very slow
+    }
+    
+    if (Reestimate) {
+      ppp_estimator(yr=i, mon=j, xPlot=FALSE, xGjson=TRUE)
+    }
+  }
+}  
+  
+}
+```
+
+``` {r plot_result_thermal_displacement, warning=FALSE, message=FALSE, results='hide', fig.height=4.9, fig.width=9.8}
+
+g1 <- ppp_estimator(yr=2020, mon=2, xPlot=TRUE, xGjson=FALSE)
+g1
+```
+
+``` {r reload_stored_geojson, warning=FALSE, message=FALSE, results='hide'}
+yr=2018
+mon="06"
+outdir <- "../data_src/oisst/thermal_displace/"
+sf1d <- st_read(paste0(outdir, yr, mon, "_hwv_occ_poly.geojson"))
+sf2d <- st_read(paste0(outdir, yr, mon, "_hwv_dis_poly.geojson"))
+sfl1 <- st_read(paste0(outdir, yr, mon, "_hwv_occ_contour.geojson"))
+sfl2 <- st_read(paste0(outdir, yr, mon, "_hwv_dis_contour.geojson"))
+sfc1 <- st_read(paste0(outdir, yr, mon, "_hwv_occ.geojson"))
+sfc2 <- st_read(paste0(outdir, yr, mon, "_hwv_dis.geojson"))
+mnxf <- st_read(paste0(outdir, yr, mon, "_hwv_dis_correspond.geojson"))
+mnx <- cbind(as.data.table(sf::st_coordinates(mnxf)) %>% setnames(1:2, c("lng","lat")), as.data.table(mnxf))
+mnx[xm1=="NA", xm1:=NA]
+mnx[xm2=="NA", xm2:=NA]
+
+sfl1$level <- c(1:nrow(sfl1))
+sfl2$level <- c(1:nrow(sfl2)) + 16 - nrow(sfl2) 
+sflt <- rbind(sfl1, sfl2)
+```
+
+``` {r replot_stored_geojson, warning=FALSE, message=FALSE, results='hide', fig.height=4.9, fig.width=9.8}
+heatwave <- read_stars(paste0("../data_src/oisst/monthly_heatwave_detrend/", yr, mon, "_heatwave.nc"))
+names(heatwave)[1] <- "heatwave"      
+ht <- as.data.table(heatwave) %>% 
+      .[,`:=`(longitude=fifelse(x>180, x-360, x), latitude=y)] %>% .[,.(longitude, latitude, heatwave)]
+
+gf <- ggplot() +  
+      geom_point(data=ht[heatwave==1,], aes_string(x="longitude", y="latitude"), alpha=0.65, col="gold", size = 0.01, stroke = 0, shape = 16) +
+      #geom_sf(data=sfc1, alpha=0.75, col="orange", size = 0.01, stroke = 0, shape = 16) + 
+      geom_sf(data=sfc2, alpha=0.75, col="purple", size = 0.01, stroke = 0, shape = 16) + 
+      geom_sf(data = ne_coastline(scale = "large", returnclass = "sf"), color = 'darkgray', size = .3) +
+      geom_sf(data = sflt, aes(color=level)) +
+      scale_colour_gradientn(colours=rev(jet.colors(16))) +  
+      #geom_sf(data = sf1d, fill="#F8766D80", color="#F8766D80", alpha=0.5) + 
+      geom_sf(data = sf2d, fill="#00BFC480", color="#00BFC480", alpha=0.5) +
+      guides(fill="none", color="none") + coord_sf() + #xlim(c(-180, 180)) + ylim(c(-90, 90)) +
+      scale_x_continuous(limits = c(-180, 180), expand = c(0, 0)) + 
+      scale_y_continuous(limits = c(-90, 90), expand = c(0, 0)) +
+      labs(x="Longitude",y="Latitude") +
+      theme(
+        panel.background = element_rect(fill="white"),
+        panel.border = element_rect(colour = "black", fill=NA, size=0.75),
+        panel.grid.major = element_line(colour = "lightgrey"),
+        panel.grid.minor = element_line(colour = "lightgrey"),
+        strip.background = element_blank(),
+        strip.text.y = element_text(angle = 0),#,face = "italic"),
+        legend.background = element_rect(fill = "transparent", colour = "transparent"),#, #"white"),
+        legend.position = NULL
+      )
+
+    
+    if (any(!is.na(mnx$xm1))) {
+      gf <- gf +
+        geom_segment(data=mnx[!is.na(xm1),], aes(x=lng, xend=xm1, y=lat, yend=ym1), size = 0.75, color="purple") + #, color=factor(seamask)
+        geom_segment(data=mnx[!is.na(xm1),], aes(x=xm2, xend=xd, y=ym2, yend=yd), size = 0.75, arrow = arrow(length = unit(0.08, "cm")), color="purple") + 
+        geom_segment(data=mnx[is.na(xm1),], aes(x=lng, xend=xd, y=lat, yend=yd), size = 0.75, arrow = arrow(length = unit(0.08, "cm")), color="purple") + 
+        geom_text_repel(data=mnx[!is.na(xm1),], aes(x=xd, y=yd, label=paste0(round(ddis,0), " km")), color = "black", size=3, hjust=1, vjust=1) + #geom_text
+        geom_text_repel(data=mnx[is.na(xm1),], aes(x=0.5*(lng+xd), y=0.5*(lat+yd), label=paste0(round(ddis,0), " km")), color = "black", size=3, hjust=1, vjust=1)
+    } else {
+      gf <- gf +
+        geom_segment(data=mnx, aes(x=lng, xend=xd, y=lat, yend=yd), size = 0.75, arrow = arrow(length = unit(0.08, "cm")), color="purple") + 
+        geom_text_repel(data=mnx, aes(x=0.5*(lng+xd), y=0.5*(lat+yd), label=paste0(round(ddis,0), " km")), color = "black", size=3, hjust=1, vjust=1) 
+    }
+
+gf      
+```
