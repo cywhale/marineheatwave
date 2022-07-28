@@ -275,6 +275,7 @@ plot_pred <- function(x, y, yhat=NULL) {
 }
 
 plot_pred(seq_along(datex), seqx[3,], haty$`test`)
+#save(seqx, file="../data_src/stats/test_stars_predict00.RData")
 }
 
 ```
