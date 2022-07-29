@@ -213,9 +213,6 @@ trackdate <- seq.Date(as.IDate(endt)-6, as.IDate(endt), by="day")
 curryr <- year(as.IDate(endt))
 currmo <- month(as.IDate(endt))
 
-NEED_RETEST_PRED <- FALSE
-if (NEED_RETEST_PRED) {
-  
 j=4 #just testing, arbitrary select a month
 monj <- fifelse(j<10, paste0("0",j), paste0(j))
 jstr <- monstr[j]
@@ -275,8 +272,7 @@ plot_pred <- function(x, y, yhat=NULL) {
 }
 
 plot_pred(seq_along(datex), seqx[3,], haty$`test`)
-#save(seqx, file="../data_src/stats/test_stars_predict00.RData")
-}
+save(seqx, file="../data_src/stats/test_stars_predict00.RData")
 
 ```
 
@@ -308,8 +304,7 @@ for (i in yrng) {
 
 ``` {r double_check_anomaly, warning=FALSE, message=FALSE, results='hide', fig.height=4.9, fig.width=9.8}
 ## Just check if plot 2022-04
-if (Recalculate_anom) {
-
+#if (Recalculate_anom) {
 gx2 <- gplotx(z, "anom", minz=-3.5, maxz=3.5, return=TRUE) #This anomaly is substrat long-term mean (30yrs, 1982-2011)
 #y <- read_stars("../data_src/oisst/monthly_anom/202204_anom.nc")
 #names(y)[1] <- "anom" 
@@ -317,87 +312,142 @@ gx2 <- gplotx(z, "anom", minz=-3.5, maxz=3.5, return=TRUE) #This anomaly is subs
 
 layt <- rbind(c(1,1,2,2))
 grid.arrange(gx2, gy, layout_matrix=layt)
-}
+#}
 ```
 
 
-```{r timeconsuming_calculate_anomaly, warning=FALSE, message=FALSE, results='hide'}
+```{r store_calculated_anomaly, warning=FALSE, message=FALSE, results='hide'}
 ## It's hard/slow to detrend each x,y along almost 30yr (30x12) year trend. Must read 1440x720x30x12 at once...
-Recalculate_anom <- FALSE
+#removeLargeObj <- TRUE
+#if (removeLargeObj) {
+#  rm(land_mask, landm, stm)
+#}
+# 20220727 modified for detrend not distinguish month, all time-span should involved
+Reload_allnc <- FALSE
+#predyr <- 2021 # previous year that has whole 1-12 month data
+#predrng<- seq(1982, predyr) 
 yrs <- yrng[length(yrng)] - yrng[1] + 1
+#yrs <- predrng[length(predrng)] - predrng[1] + 1
 
-if (Recalculate_anom) {
-for (j in 1:12) {
-  monj <- fifelse(j<10, paste0("0",j), paste0(j))
-  jstr <- monstr[j]
+if (Reload_allnc) {
   for (i in yrng) {
-    if (i==curryr & j>(currmo-1)) break
-    
-    z <- read_stars(paste0("../data_src/oisst/monthly_anom_icemask/", i, monj, "_anom.nc"))
+    for (j in 1:12) {
+      if (i==curryr & j>(currmo-1)) break
+      monj <- fifelse(j<10, paste0("0",j), paste0(j))
+      jstr <- monstr[j]
+      
+      z <- read_stars(paste0("../data_src/oisst/monthly_anom_icemask/", i, monj, "_anom.nc"))
+      names(z) <- "anom"
 
-    if (i==yrng[1]) {
-      stdrx <- z
-      datex<- as.Date(paste0(i, monj, "01"), format="%Y%m%d")
-    } else {
-      stdrx <- c(stdrx, z)
-      datex<- c(datex, as.Date(paste0(i, monj, "01"), format="%Y%m%d"))
+      if (i==yrng[1] & j==1) {
+        stdrx <- z
+        datex<- as.Date(paste0(i, monj, "01"), format="%Y%m%d")
+      } else {
+        stdrx <- c(stdrx, z)
+        datex<- c(datex, as.Date(paste0(i, monj, "01"), format="%Y%m%d"))
+      }
     }
   }
-  names(stdrx) <- rep(jstr, length(names(stdrx)))
   print(paste0("Now in Year-month: ", i," - ", monj, " and have length stdrx: ", length(datex)))
+#  save(stdrx, file="../data_src/stats/monthly_anom_1982_2021_nc.RData") #too big, not save
+} #else {
+#  load("../data_src/stats/monthly_anom_1982_2021_nc.RData")
+#}
+```
+
+```{r pred_stored_anomaly, warning=FALSE, message=FALSE, results='hide'}
+Recalculate_anom <- FALSE
+if (Reload_allnc) {
+  trd <- merge(stdrx) %>% st_set_dimensions(3, values = as.POSIXct(datex), names = "time") 
+  tx <- st_get_dimension_values(trd, 3)
   
-  predy <- function(x) { return (stats::predict(lm(x ~ seq_along(datex)))) }
-  trd <- merge(stdrx) %>% st_set_dimensions(3, values = as.POSIXct(datex), names = "time") %>% 
-    aggregate(by=paste0(yrs, " years"), FUN = function(y) {
-       if (all(is.na(y))) return(list(as.numeric(y)))
-       y[!is.na(y)] <- as.numeric(predy(y)) #Seems if return value has equal length, the result will be simplified by aggregate if using as.matrix
-       return(list(as.numeric(y))) #Old-version bug: not predy(y), should be y. See previous testing chunk
-    })
-  tk <- array(unlist(trd[[1]]), dim = c(length(datex),1440,720)) #bug fix: NOT each predict have the same length result (if input has NA)
+  predtx <- function(x) {
+    if (all(is.na(x))) return(list(as.numeric(x)))
+    x[!is.na(x)] <- as.numeric(stats::predict(lm(x ~ tx))) 
+    return(list(as.numeric(x))) 
+  }  
+  trdx <- st_apply(adrop(trd), c(1,2), predtx)
+  tk <- array(unlist(trdx[[1]]), dim = c(length(datex),1440,720)) 
+  save(tk, file="../data_src/stats/predict_anom_1982_202204_nc.RData") #too big, not save
+} else {
+  if (Recalculate_anom) load("../data_src/stats/predict_anom_1982_202204_nc.RData")
+}
+```
+
+```{r detrend_anomaly, warning=FALSE, message=FALSE, results='hide'}
+if (Recalculate_anom) {
+for (k in seq_along(yrng)) {
+for (j in 1:12) {
+  if (yrng[k]==curryr & j>(currmo-1)) break
+  monj <- fifelse(j<10, paste0("0",j), paste0(j))
+  jstr <- monstr[j]
+  nt <- (k-1)*12+j
+#  for (i in yrng) {
+#    if (i==curryr & j>(currmo-1)) break
+#    
+#    z <- read_stars(paste0("../data_src/oisst/monthly_anom_icemask/", i, monj, "_anom.nc"))
+#
+#    if (i==yrng[1]) {
+#      stdrx <- z
+#      datex<- as.Date(paste0(i, monj, "01"), format="%Y%m%d")
+#    } else {
+#      stdrx <- c(stdrx, z)
+#      datex<- c(datex, as.Date(paste0(i, monj, "01"), format="%Y%m%d"))
+#    }
+#  }
+#  names(stdrx) <- rep(jstr, length(names(stdrx)))
+#  print(paste0("Now in Year-month: ", i," - ", monj, " and have length stdrx: ", length(datex)))
   
-  print(paste0("Predict ok with dim(tk): ", paste0(dim(tk), collapse=",")))
-  for (k in seq_along(yrng)) {
-    if (yrng[k]==curryr & j>(currmo-1)) break
+#  predy <- function(x) { return (stats::predict(lm(x ~ seq_along(datex)))) }
+#  trd <- merge(stdrx) %>% st_set_dimensions(3, values = as.POSIXct(datex), names = "time") %>% 
+#    aggregate(by=paste0("months"), FUN = function(y) {
+#       if (all(is.na(y))) return(list(as.numeric(y)))
+#       y[!is.na(y)] <- as.numeric(predy(y)) #Seems if return value has equal length, the result will be simplified by aggregate if using as.matrix
+#       return(list(as.numeric(y))) #Old-version bug: not predy(y), should be y. See previous testing chunk
+#    })
+#  tk <- array(unlist(trd[[1]]), dim = c(length(datex),1440,720)) #bug fix: NOT each predict have the same length result (if input has NA)
+  
+#  print(paste0("Predict ok with dim(tk): ", paste0(dim(tk), collapse=",")))
+#  for (k in seq_along(yrng)) {
     
     z <- read_stars(paste0("../data_src/oisst/monthly_anom_icemask/", yrng[k], monj, "_anom.nc"))
     #notna1 <- which(!is.na(z[1][[1]]))
     #notna2 <- which(!is.na(tk[k,,]))
     #notna <- intersect(notna1, notna2)
     #z[[1]][notna] <- z[[1]][notna]- tk[1,,][notna]
-    z[[1]] <- z[[1]]- tk[1,,] #Any of z[[1]] or tk[1,,] NA will cause NA here, it makes sense.
+    z[[1]] <- z[[1]]- tk[nt,,] #Any of z[[1]] or tk[1,,] NA will cause NA here, it makes sense.
     names(z)[1] <- "anom"
     
     filet <- paste0("../data_src/oisst/monthly_anom_detrend/", yrng[k], monj, "_anom.nc")
     write_stars(z, filet)
-    print(paste0("Now write Year-month: ", yrng[k], " - ", monj, " ok"))
+    print(paste0("Now write Year-month: ", yrng[k], " - ", monj, " and use nth of tk: ", nt, " ok"))
   }
 }
 }  
 ```
+
 ``` {r check_result_calculate_anomaly, warning=FALSE, message=FALSE, results='hide'}
 yk <- read_stars("../data_src/oisst/monthly_anom/202006_anom.nc")
-#zk <- read_stars(paste0("../data_src/oisst/monthly_anom_detrend/", 2020, "06", "_anom.nc"))
+zk <- read_stars(paste0("../data_src/oisst/monthly_anom_detrend/", 2020, "06", "_anom.nc"))
 z <- read_stars(paste0("../data_src/oisst/monthly_anom_icemask/", 2020, "06", "_anom.nc"))
 
 names(yk)[1] <- "anom" 
-#names(zk)[1] <- "anom"
+names(zk)[1] <- "anom"
 names(z)[1] <- "anom"
 print(range(na.omit(as.data.table(yk)$anom))) #-5.911333 10.598333
-#print(range(na.omit(as.data.table(zk)$anom))) #-5.39709 16.39870   #old -8.227043 11.727673
+print(range(na.omit(as.data.table(zk)$anom))) #-5.39709 16.39870   #old -8.227043 11.727673
 print(range(na.omit(as.data.table(z)$anom)))  #-7.724047 10.483911 #old -8.361936  6.181935
 
-gyk<- gplotx(yk,"anom", minz = -6, maxz = 11.0, returnx=TRUE)
-gzk<- plot_anom(paste0("../data_src/oisst/monthly_anom_detrend/", 2020, "06", "_anom.nc"), #zk,
-                "anom", #minz = -8, maxz = 11.0, 
-                returnx=TRUE)  
-gz <- gplotx(z, "anom", minz = -6, maxz = 16.5, returnx=TRUE)  
-```
+##gyk<- gplotx(yk,"anom", minz = -6, maxz = 11.0, returnx=TRUE)
+##gz <- gplotx(z, "anom", minz = -6, maxz = 16.5, returnx=TRUE)  
+##gzk<- gplotx(zk,"anom", minz = -8, maxz = 11.0, returnx=TRUE)  
+#gyk<- gplotx(yk,"anom", minz = -6, maxz = 11.0, returnx=TRUE)
+#gzk<- gplotx(zk,"anom", minz = -10, maxz = 7.0, returnx=TRUE)  
+#gz <- gplotx(z, "anom", minz = -8, maxz = 11.0, returnx=TRUE)  
+gyk <- plot_anom("../data_src/oisst/monthly_anom/202006_anom.nc", returnx=TRUE)
+gzk <- plot_anom(paste0("../data_src/oisst/monthly_anom_detrend/", 2020, "06", "_anom.nc"), returnx=TRUE)
+gz <- plot_anom(paste0("../data_src/oisst/monthly_anom_icemask/", 2020, "06", "_anom.nc"), returnx=TRUE)
 
-```{r plot_for_report_anomaly, warning=FALSE, message=FALSE, results='hide', fig.height=29.4, fig.width=9.8}
-ga <- plot_anom(paste0("../data_src/oisst/monthly_anom_detrend/", 2022, "04", "_anom.nc"), #zk,
-                "anom", #minz = -8, maxz = 11.0, 
-                returnx=TRUE) 
-ga
 ```
 
 ``` {r plot_result_calculate_anomaly, warning=FALSE, message=FALSE, results='hide', fig.height=29.4, fig.width=9.8}
@@ -408,6 +458,13 @@ grid.arrange(gyk, gzk, gz, layout_matrix=layt)
 #gz
 
 ```
+```{r plot_for_report_anomaly, warning=FALSE, message=FALSE, results='hide', fig.height=4.9, fig.width=9.8}
+ga <- plot_anom(paste0("../data_src/oisst/monthly_anom_detrend/", 2022, "04", "_anom.nc"), #zk,
+                "anom", #minz = -8, maxz = 11.0, 
+                returnx=TRUE) 
+ga
+```
+
 ``` {r stacked_sst, warning=FALSE, message=FALSE, results='hide'}
 if (!require("layer")) {
   if (!require("remotes")) install.packages("remotes"); library(remotes)
@@ -471,3 +528,40 @@ map_list <- list(tl0, tl1, tl2, tl3)
 #palettem: https://cran.r-project.org/web/packages/viridis/vignettes/intro-to-viridis.html
 layer::plot_tiltedmaps(map_list, palette = "turbo")
 ```
+
+``` {r verify_predict_anomaly, warning=FALSE, message=FALSE}
+zt1 <- fread("../data_src/verify/198201_detrend_anom_yeh.csv") 
+zt <- read_stars(paste0("../data_src/oisst/monthly_anom_detrend/", 1982, "01", "_anom.nc"))
+tt1 <- as.matrix(zt1)
+tt <- zt[[1]]
+quantile(na.omit(tt1[25,]))
+quantile(na.omit(tt[25,]))
+length(which(is.na(tt1)))
+#[1] 548586
+length(which(is.na(tt))) #[1] 474337 !! large diff, should check...
+range(na.omit(as.numeric(tt1)))
+range(na.omit(as.numeric(tt)))
+
+plot(1:720, tt1[25,], type="l", col="blue")
+points(1:720, tt[1440-25+1,], type="l", col="green", add=T)
+#points(1:720, tt1[1440-25,], type="l", col="red", add=T)
+#points(1:720, tt[1440-25,], type="l", col="brown", add=T)
+
+zt <- as.data.table(zt) %>% setnames(3, "anom")
+xval <- sort(unique(zt$x))
+yval <- rev(sort(unique(zt$y)))
+zt1 <- cbind(c(1:1440), zt1)
+setnames(zt1, 1, "xid")
+zt1a <- melt(zt1, id.vars = "xid", measure.vars = patterns("^V")) %>%
+  .[,vart:=gsub("V","",variable) %>% as.integer()] %>%
+  .[,`:=`(x=xval[xid], y=rev(yval)[vart])] %>%
+  .[,.(x, y, value)] %>% setnames(3, "anom")
+
+gz1a <- gplotx(zt1a, "anom", minz = -7.5, maxz = 4, returnx=TRUE)
+gzt <- gplotx(zt, "anom", minz = -7.5, maxz = 4, returnx=TRUE)
+layt <- rbind(c(1,1),c(2,2))
+grid.arrange(gzt, gz1a, layout_matrix=layt)
+
+```
+
+
