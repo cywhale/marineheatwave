@@ -542,11 +542,6 @@ length(which(is.na(tt))) #[1] 474337 !! large diff, should check...
 range(na.omit(as.numeric(tt1)))
 range(na.omit(as.numeric(tt)))
 
-plot(1:720, tt1[25,], type="l", col="blue")
-points(1:720, tt[1440-25+1,], type="l", col="green", add=T)
-#points(1:720, tt1[1440-25,], type="l", col="red", add=T)
-#points(1:720, tt[1440-25,], type="l", col="brown", add=T)
-
 zt <- as.data.table(zt) %>% setnames(3, "anom")
 xval <- sort(unique(zt$x))
 yval <- rev(sort(unique(zt$y)))
@@ -557,11 +552,67 @@ zt1a <- melt(zt1, id.vars = "xid", measure.vars = patterns("^V")) %>%
   .[,`:=`(x=xval[xid], y=rev(yval)[vart])] %>%
   .[,.(x, y, value)] %>% setnames(3, "anom")
 
+setorder(zt, -y, x) ## the same order as original zt data.frame
+setorder(zt1a, -y, x)
+
 gz1a <- gplotx(zt1a, "anom", minz = -7.5, maxz = 4, returnx=TRUE)
 gzt <- gplotx(zt, "anom", minz = -7.5, maxz = 4, returnx=TRUE)
 layt <- rbind(c(1,1),c(2,2))
 grid.arrange(gzt, gz1a, layout_matrix=layt)
 
+plot(1:720, zt1a[x==121.125,]$anom, type="l", col="blue")  #almost the same
+points(1:720, zt[x==121.125,]$anom, type="l", col="red", lty=2, add=T)
+plot(1:720, zt1a[x==10.125,]$anom, type="l", col="green")
+points(1:720, zt[x==10.125,]$anom, type="l", col="brown", lty=2, add=T)
+
+chk_x <- 360-145+0.125 ## Now try to plot paper 145W, 55N detrend vs anom not detrended
+chk_y <- 50.125
+plot(1:720, zt1a[x==chk_x,]$anom, type="l", col="black")
+points(1:720, zt[x==chk_x,]$anom, type="l", col="magenta", lty=2, add=T)
+plot(1:1440, zt1a[y==chk_y,]$anom, type="l", col="black")
+points(1:1440, zt[y==chk_y,]$anom, type="l", col="magenta", lty=2, add=T)
+plot(1:1440, zt1a[y==0.125,]$anom, type="l", col="black")
+points(1:1440, zt[y==0.125,]$anom, type="l", col="magenta", lty=2, add=T)
+
 ```
 
+```{r verify_detrend_anomaly_paper, warning=FALSE, message=FALSE}
+Reverify_paper <- FALSE
+idxt <- which(zt$x==chk_x & zt$y==chk_y) #229821
+zt[idxt,] #-0.3095802
+idxm <- idxt %% 1440
+idym <- floor(idxt/1440) +1
+tt[idxm,idym] == zt[idxt,]$anom 
+if (Reverify_paper) {
+  anomx <- c()
+  anomd <- c()
+  sstx <- c()
+  for (i in yrng) {
+    for (j in 1:12) {
+      if (i==curryr & j>(currmo-1)) break
+      monj <- fifelse(j<10, paste0("0",j), paste0(j))
 
+      zd <- read_stars(paste0("../data_src/oisst/monthly_anom_detrend/", i, monj, "_anom.nc"))
+      anomd <- c(anomd, zd[[1]][idxm, idym])
+      
+      zk <- read_stars(paste0("../data_src/oisst/monthly_anom_icemask/", i, monj, "_anom.nc"))
+      anomx <- c(anomx, zk[[1]][idxm, idym])
+
+      zs <- read_stars(paste0("../data_src/oisst/monthly_sst/", i, monj, "_sst.nc"))
+      sstx <- c(sstx, zs[[1]][idxm, idym])
+      if (i==yrng[1] & j==1) {
+        testdatex <- as.Date(paste0(i, monj, "01"), format="%Y%m%d")
+      } else {
+        testdatex<- c(testdatex, as.Date(paste0(i, monj, "01"), format="%Y%m%d"))
+      }
+    }
+  }  
+  save(anomx, anomd, sstx, testdatex, file="../data_src/stats/verify_paper_loc145W50N_sst_anom_1982_202204.RData")
+} else {
+  load("../data_src/stats/verify_paper_loc145W50N_sst_anom_1982_202204.RData")
+}
+
+plot(testdatex[1:468], sstx[1:468], type="l", col="magenta")
+plot(testdatex[1:468], anomx[1:468], type="l", col="magenta", ylim=c(-2,3))
+points(testdatex[1:468], anomd[1:468], type="l", col="black", add=T)
+```
