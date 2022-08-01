@@ -582,6 +582,8 @@ idxt <- which(zt$x==chk_x & zt$y==chk_y) #229821
 zt[idxt,] #-0.3095802
 idxm <- idxt %% 1440
 idym <- floor(idxt/1440) +1
+idym <- fifelse(idxm==0, idym, idym+1)
+idxm <- fifelse(idxm==0, 1440, idxm)
 tt[idxm,idym] == zt[idxt,]$anom 
 if (Reverify_paper) {
   anomx <- c()
