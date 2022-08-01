@@ -51,7 +51,7 @@ setorder(dt, -y, x)
 dt[,ry:=rowid(x)] ## NOTE that in OISST.nc file, y is from Northest (89.875) to Southest (-89.875)
 #################### Actually, x is 0-360 in nc so is 0-180 -180-0 arranged
 mask <- dcast(dt, x ~ ry, value.var = "seamask")[,-1] %>% as.matrix()
-mlon <- dcast(dt, x ~ ry, value.var = "lon")[,-1] %>% as.matrix()
+mlon <- dcast(dt, x ~ ry, value.var = "x")[,-1] %>% as.matrix() #modifiy error" value.var = "lon", changed to use 0-360, 202207
 mlat <- dcast(dt, x ~ ry, value.var = "y")[,-1] %>% as.matrix()
 
 if (Detrend) {
