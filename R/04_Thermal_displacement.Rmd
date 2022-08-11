@@ -108,6 +108,7 @@ if (!require("maptools")) install.packages("maptools"); library(maptools)
 if (!require("rgeos")) install.packages("rgeos"); library(rgeos)
 if (!require("ggrepel")) install.packages("ggrepel"); library(ggrepel)
 if (!require("geojsonsf")) install.packages("geojsonsf"); library(geojsonsf)
+if (!require("geojsonio")) install.packages("geojsonio"); library(geojsonio)
 
 ## Null parameter in vector check
 has_val <- function(x) {
@@ -183,8 +184,10 @@ ppp_estimator <- function(yr, mon, tdf=NULL, heatwave=NULL, coast=NULL, xPlot=FA
   kzc <- density(ptc, sigma=15,  kernel = "quartic", adjust = 0.2, cut=6) #, ext=extent(x))
   kzct <- copy(kzc)
   thre_kzc <- as.integer(quantile(kzc[kzc>=3])[4]) #75% = 3/4 quantile 
-  if (thre_kzc>=5) {
+  if (thre_kzc>=5 & length(kzct[kzct>=5])>=100) {
     kzct[kzct<5] <- NA
+  } else if (thre_kzc>=5) {
+    kzct[kzct<4] <- NA
   } else {
     #kzct[kzct<thre_kzc] <- NA
     #kzct[kzct<as.numeric(quantile(kzc[kzc>=3])[3])] <- NA #50% = median
@@ -199,8 +202,11 @@ ppp_estimator <- function(yr, mon, tdf=NULL, heatwave=NULL, coast=NULL, xPlot=FA
   Window(pth) <- owin(xrange=c(-180,360), yrange=c(-90,90))
   kzh <- density(pth, sigma=15,  kernel = "quartic", adjust = 0.2, cut=6)
   kzht <- copy(kzh)
-  if (thre_kzc>=5) {
+  thre_kzh <- as.integer(quantile(kzh[kzh>=3])[4]) #75% = 3/4 quantile 
+  if (thre_kzh>=5 & length(kzht[kzht>=5])>=100) {
     kzht[kzht<5] <- NA
+  } else if (thre_kzh>=5) {
+    kzht[kzht<4] <- NA
   } else {
     #kzht[kzht<thre_kzc] <- NA
     #kzht[kzht<as.numeric(quantile(kzh[kzh>=3])[3])] <- NA #50% = median
