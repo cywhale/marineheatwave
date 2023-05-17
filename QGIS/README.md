@@ -39,4 +39,9 @@
 
     - 請參考上述選擇性套件：QuickMapServices Plugin 即可簡易選擇底圖
 
-![fig01-05: MHW with basemap](fig/mhw_wms_learning01-06_wms_basemap.png)     
+![fig01-05: MHW with basemap](fig/mhw_wms_learning01-06_wms_basemap.png)
+
+**Contact Us**
+
+   * [ODB website - About Us](https://www.odb.ntu.edu.tw/about-us): yehtc@ntu.edu.tw or cyweng24@ntu.edu.tw
+ 
