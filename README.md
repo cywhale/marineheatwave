@@ -7,7 +7,9 @@
 **操作功能表單，加入 MHW WMS**
 
 1. 功能表單【Layer】->【Add Layer】->【Add WMS/WMTS Layer】，跳出對話框
+
 ![fig01-01: Options to add WMS/WMTS layer](fig/mhw_wms_learning01-01_addlayer.png) 
+
 
 2. 若是第一次操作，尚未加入 ODB WMS server，於對話框按【New】，跳出子對話框，可在此填入 ODB WMS server URL
 
@@ -17,6 +19,7 @@
 
 ![fig01-02: ODB WMS server connection](fig/mhw_wms_learning01-02_new_connection.png) 
 
+
 3. 此時已可在上一層對話框中看到剛才填入的 Connection: ODB_marineheatwave，按【Connect】
 
     - Note! 可能需要等待 30 seconds - 1 minutes 與 ODB WMS server 連接，取得圖層資訊
@@ -25,9 +28,11 @@
 
 ![fig01-03: Select 'mhw' layer and add](fig/mhw_wms_learning01-03_confirm_addlayer.png) 
 
+
 4. 若圖層下載成功，可在QGIS 看到最新月份的海洋熱浪 WMS 圖層，左下圖層框會有圖層圖例，區分海洋熱浪從 moderate -> extreme為四級
 
 ![fig01-04: MHW layer](fig/mhw_wms_learning01-04_mhw_layer.png) 
+
 
 5. 若要調整 MHW 出現的時間，請選擇功能表單下的時鐘圖示（clock icon: Temporal Controller Panel），按下後會出現時間控制儀表板
 
@@ -35,11 +40,13 @@
 
 ![fig01-05: WMS Time Control](fig/mhw_wms_learning01-05_wms_time_control.png) 
 
+
 6. 可以為 ODB MHW WMS layer 加上喜歡的底圖，疊圖後讓海洋熱浪發生的位置更為清楚！
 
     - 請參考上述選擇性套件：QuickMapServices Plugin 即可簡易選擇底圖
 
 ![fig01-05: MHW with basemap](fig/mhw_wms_learning01-06_wms_basemap.png)
+
 
 **Contact Us**
 
