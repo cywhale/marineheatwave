@@ -37,3 +37,5 @@ node_modules
 **/monthly_anom_icemask/*04*.nc
 **/sst.mnmean.nc
 **/predict_anom_1982_*_nc.RData
+**/.env
+**/*.zarr
