@@ -17,7 +17,7 @@ def generate_custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
     openapi_schema = get_openapi(
-        title="ODB API of Marine Heatwaves",
+        title="Open API of Marine Heatwaves, ODB",
         version="1.0.0",
         description="Marine heatwaves (MHWs) evaluated from 0.25-degree gridded NOAA OISST v2.1.\n" +
                     "Reference: Jacox, Alexander, Bograd, and Scott (2020), Thermal Displacement by Marine Heatwaves, Nature, 584, 82–86, doi:10.1038/s41586-020-2534-z",
@@ -35,7 +35,7 @@ def generate_custom_openapi():
 app = FastAPI(docs_url=None)
 
 
-@app.get("/api/openapi.json", include_in_schema=False)
+@app.get("/api/swagger/openapi.json", include_in_schema=False)
 async def custom_openapi():
     # app.openapi()) modify to customize openapi.json
     return JSONResponse(generate_custom_openapi())
@@ -44,7 +44,7 @@ async def custom_openapi():
 @app.get("/api/swagger", include_in_schema=False)
 async def custom_swagger_ui_html():
     return get_swagger_ui_html(
-        openapi_url="/api/openapi.json",  # app.openapi_url
+        openapi_url="/api/swagger/openapi.json",  # app.openapi_url
         title=app.title
     )
 
