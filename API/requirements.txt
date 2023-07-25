@@ -2,6 +2,7 @@ dask==2023.7.1
 fastapi==0.100.0
 gunicorn==21.2.0
 pandas==2.0.3
+polars==0.18.8
 pydantic==2.0.3
 uvicorn==0.23.1
 xarray==2023.7.0
