@@ -1,6 +1,8 @@
 import xarray as xr
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query
+import polars as pl
+# import numpy as np
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
@@ -8,7 +10,7 @@ from typing import Optional, List
 from pydantic import BaseModel
 from datetime import date, datetime, timedelta
 from tempfile import NamedTemporaryFile
-import dask
+import json, dask
 from multiprocessing.pool import Pool
 dask.config.set(pool=Pool(4))
 
@@ -17,9 +19,9 @@ def generate_custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
     openapi_schema = get_openapi(
-        title="Open API of Marine Heatwaves, ODB",
+        title="Open API of Marine Heatwaves",
         version="1.0.0",
-        description="Marine heatwaves (MHWs) evaluated from 0.25-degree gridded NOAA OISST v2.1.\n" +
+        description="Marine heatwaves (MHWs) evaluated from 0.25-degree gridded NOAA OISST v2.1, compiled by ODB, Taiwan. \n" +
                     "Reference: Jacox, Alexander, Bograd, and Scott (2020), Thermal Displacement by Marine Heatwaves, Nature, 584, 82–86, doi:10.1038/s41586-020-2534-z",
         routes=app.routes,
     )
@@ -28,6 +30,11 @@ def generate_custom_openapi():
             "url": "https://eco.odb.ntu.edu.tw"
         }
     ]
+    # cause error: at responses.200/422.content.application/json.schema.$ref
+    # openapi_schema["components"].pop("schemas", None)
+    # if "schemas" in openapi_schema["components"]:
+    #     openapi_schema["components"]["schemas"].pop("HTTPValidationError", None)
+    #     openapi_schema["components"]["schemas"].pop("ValidationError", None)
     app.openapi_schema = openapi_schema
     return app.openapi_schema
 
@@ -129,7 +136,10 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
         # if 'date' in df.columns:
         df['date'] = df['date'].apply(
             lambda x: x.isoformat() if not pd.isnull(x) else '')
-        return df
+        ##df.replace([np.inf, -np.inf], np.nan, inplace=True)  # Replace infinite values with NaN
+        ##df.fillna("", inplace=True)  # Replace NaN values with None #not "null"
+        # return df #Pandas version
+        return pl.from_pandas(df)
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -144,7 +154,7 @@ class MHWResponse(BaseModel):
     td: Optional[float]
 
 
-@app.get("/api/mhw", response_model=List[MHWResponse])
+@app.get("/api/mhw", response_model=List[MHWResponse], tags=["Marine Heatwave"], summary="Query MHW data as JSON")
 async def read_mhw(
     lon0: float = Query(...,
                         description="Minimum longitude, range: [-180, 180]"),
@@ -160,11 +170,20 @@ async def read_mhw(
     append: Optional[str] = Query(
         None, description="Data fields to append, separated by commas. Allowed fields: 'sst_anomaly', 'level', 'td'")
 ):
+    """
+    Query MHW data by longitude/latitude/date (in JSON).
+
+    #### Usage
+    * One-point MHWs without time-span limitation: e.g. /api/mhw?lon0=135&lat0=15
+    * Bonding-box MHWs with 1-year time-span limitation: e.g. api/mhw?lon0=135&lon1&=140&lat0=15&lat1=30&start=2021-01-01
+    """
+
     df = await process_mhw_data(lon0, lat0, lon1, lat1, start, end, append)
-    return JSONResponse(content=df.to_dict(orient='records'))
+    ##return JSONResponse(content=df.to_dict(orient='records')) #cannot handle NA when JSONResponse
+    # return JSONResponse(content=json.loads(df.to_json(orient='records'))) # work version in Pandas
+    return JSONResponse(content=df.to_dicts())
 
-
-@app.get("/api/mhw/csv")
+@app.get("/api/mhw/csv", response_class=Response, tags=["Marine Heatwave"], summary="Query MHW data as CSV")
 async def read_mhw_csv(
     lon0: float = Query(...,
                         description="Minimum longitude, range: [-180, 180]"),
@@ -180,8 +199,18 @@ async def read_mhw_csv(
     append: Optional[str] = Query(
         None, description="Data fields to append, separated by commas. Allowed fields: 'sst_anomaly', 'level', 'td'")
 ):
+    """
+    Query MHW data by longitude/latitude/date (in csv).
+
+    #### Usage
+    * One-point MHWs without time-span limitation: e.g. /api/mhw?lon0=135&lat0=15
+    * Bonding-box MHWs with 1-year time-span limitation: e.g. api/mhw?lon0=135&lon1&=140&lat0=15&lat1=30&start=2021-01-01
+    """
+
     df = await process_mhw_data(lon0, lat0, lon1, lat1, start, end, append)
     temp_file = NamedTemporaryFile(delete=False)
-    df.to_csv(temp_file.name, index=False)
+    # df.to_csv(temp_file.name, index=False) #Pandas solution, work
+    df.write_csv(temp_file.name) #polars version
+
     startx = '1982-01-01' if start is None else str(start)
     return FileResponse(temp_file.name, media_type="text/csv", filename="mhw_" + startx + ".csv")
