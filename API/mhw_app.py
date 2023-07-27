@@ -225,7 +225,8 @@ async def read_mhw(
 
     #### Usage
     * One-point MHWs without time-span limitation: e.g. /api/mhw?lon0=135&lat0=15
-    * Bonding-box MHWs with 1-year time-span limitation: e.g. api/mhw?lon0=135&lon1&=140&lat0=15&lat1=30&start=2021-01-01
+    * Bounding-box <= 90x90 in degrees: 1-year time-span limitation: e.g. /api/mhw?lon0=135&lon1&=140&lat0=15&lat1=30&start=2021-01-01
+    * Bounding-box > 90x90 in degrees: 1-month time-span limitation: e.g. /api/mhw?lon0=-180&lon1&=180&lat0=-90&lat1=90&start=2021-01-01
     """
 
     _, df = await process_mhw_data(lon0, lat0, lon1, lat1, start, end, append)
@@ -254,7 +255,8 @@ async def read_mhw_csv(
 
     #### Usage
     * One-point MHWs without time-span limitation: e.g. /api/mhw?lon0=135&lat0=15
-    * Bonding-box MHWs with 1-year time-span limitation: e.g. api/mhw?lon0=135&lon1&=140&lat0=15&lat1=30&start=2021-01-01
+    * Bounding-box <= 90x90 in degrees: 1-year time-span limitation: e.g. /api/mhw?lon0=135&lon1&=140&lat0=15&lat1=30&start=2021-01-01
+    * Bounding-box > 90x90 in degrees: 1-month time-span limitation: e.g. /api/mhw?lon0=-180&lon1&=180&lat0=-90&lat1=90&start=2021-01-01
     """
 
     out_file, df = await process_mhw_data(lon0, lat0, lon1, lat1, start, end, append)
