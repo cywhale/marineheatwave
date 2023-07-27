@@ -17,9 +17,14 @@ https://eco.odb.ntu.edu.tw/api/swagger
 
 - e.g. https://eco.odb.ntu.edu.tw/api/mhw?lon0=135&lat0=15
 
-###### Bonding-box MHWs with 1-year time-span limitation:
+###### Bonding-box <= 90 * 90 in degrees: 1-year time-span limitation for fetching MHWs
 
 - e.g. https://eco.odb.ntu.edu.tw/api/mhw?lon0=135&lon1&=140&lat0=15&lat1=30&start=2021-01-01
+
+###### Bonding-box > 90 * 90 in degrees: 1-month time-span limitation for fetching MHWs
+
+- e.g. https://eco.odb.ntu.edu.tw/api/mhw?lon0=-180&lon1&=180&lat0=-90&lat1=90&start=2021-01-01
+
 
 ###### The parameter 'append' can append more data-variables (level, sst_anomaly, td) in data output
 
