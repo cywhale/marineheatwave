@@ -12,5 +12,6 @@ module.exports = {
     append_env_to_name: true,
     watch: false,
     max_memory_restart: '4G',
+    pre_stop: 'kill $(ps aux | grep \'mhw_app\' | awk \'{print $2}\')',
   }],
 };
