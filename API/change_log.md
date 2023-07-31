@@ -6,3 +6,5 @@ ODB API of Marine Heatwaves
 #### ver 0.1.2 rewrite zarr to solve nan merged in diff rows problem/use pypolars
 
 #### ver 0.1.3 Breaking fix bug conversion to [0,360]/pm2 pre-stop kill gunicorn processes
+
+#### ver 0.1.4 Breaking add SST/Climatology plot API/Use Dask-scheduler/worker

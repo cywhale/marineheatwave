@@ -1,18 +1,24 @@
 import xarray as xr
 import pandas as pd
-import polars as pl
-import numpy as np
+# import polars as pl
+# import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Response
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from typing import Optional, List
 from pydantic import BaseModel
-from datetime import date, datetime, timedelta
+from datetime import date, datetime  # , timedelta
 from tempfile import NamedTemporaryFile
-import json, dask
-from multiprocessing.pool import Pool
-dask.config.set(pool=Pool(4))
+from mhw_utils import process_mhw_data
+from mhw_plot import month_climatology, region_climatology, period2date
+import config
+# import json, dask
+# This is a more low-level way of setting up Dask for parallel computations, and it doesn't provide some of the additional features of Dask's own distributed scheduler, such as advanced task prioritization and data locality awareness.
+# from multiprocessing.pool import Pool
+# dask.config.set(pool=Pool(4))
+from dask.distributed import Client
+client = Client('tcp://localhost:8786')
 
 
 def generate_custom_openapi():
@@ -56,143 +62,19 @@ async def custom_swagger_ui_html():
     )
 
 ### Global variables ###
-gridSz = 0.25
-timeLimit = 365
-LON_RANGE_LIMIT = 90
-LAT_RANGE_LIMIT = 90
-AREA_LIMIT = LON_RANGE_LIMIT * LAT_RANGE_LIMIT
+### move to config.py ##
+
 
 @app.on_event("startup")
 async def startup():
-    global dz
-    dz = xr.open_zarr('sst_anomaly.zarr', chunks='auto',
-                      group='anomaly', decode_times=True)
-
-
-def deg2str(value, isLon=True, oriNeg=False, roundTo=3):
-    if (isLon):
-      # if original lon is -180 -> 180 + 360 = 180 -> deg2str -> 180 cannot convert back to -180
-      lon = value - 360 if value > 180 or oriNeg else value
-      return str(round(lon, roundTo)).replace(".", "d")
-
-    return str(round(value, roundTo)).replace(".", "d")
-
-def to_nearest_grid_point(lon: float, lat: float) -> tuple:
-    mlon = 180 if lon > 180 else (-180 if lon < -180 else lon)
-    mlat = 90 if lat > 90 else (-90 if lat < -90 else lat)
-    grid_lon = round(mlon * 4) / 4
-    grid_lat = round(mlat * 4) / 4
-    grid_lon = grid_lon + 360 if grid_lon < 0 else grid_lon
-    return (grid_lon, grid_lat)
-
-
-async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1: Optional[float], start: Optional[date], end: Optional[date], append: Optional[str]):
-    if append is None:
-        append = 'level'
-
-    variables = [var.strip() for var in append.split(
-        ',') if var.strip() in ['level', 'sst_anomaly', 'td']]
-    if not variables:
-        raise HTTPException(
-            status_code=400, detail="Invalid variable(s). Allowed variables are 'sst_anomaly', 'level', and 'td'.")
-
-    variables.sort() #in-place sort not return anything
-    out_file = '-'.join(variables)
-
-    if start is None:
-        start_date = pd.to_datetime('1982-01-01')
-    else:
-        try:
-            start_date = pd.to_datetime(start)
-            start_date = start_date.replace(day=1)  # set day to 1
-        except ValueError:
-            raise HTTPException(
-                status_code=400, detail="Invalid start date format")
-
-    if end is None:
-        end_date = pd.to_datetime(datetime.today())
-    else:
-        try:
-            end_date = pd.to_datetime(end)
-            end_date = end_date.replace(day=1)  # set day to 1
-        except ValueError:
-            raise HTTPException(
-                status_code=400, detail="Invalid end date format")
-
-    try:
-        orig_lon0, orig_lon1 = lon0, lon1
-        lon0, lat0 = to_nearest_grid_point(lon0, lat0)
-
-        if lon1 is None or lat1 is None:
-            # Only one point, no date range limitation
-            out_file = (out_file + '_' + deg2str(lon0, True, orig_lon0<=-179.875) + '_' + deg2str(lat0, False) +
-                        '_' + 'Point' + '_' + str(start_date.date()) + '_' + str(end_date.date()))
-            data_subset = dz.sel(lon=slice(lon0, lon0+gridSz-0.01), lat=slice(
-                lat0, lat0+gridSz-0.01), date=slice(start_date, end_date))
-
-        else:
-            # Bounding box, 1 month or 1 year date range limitation
-            lon1, lat1 = to_nearest_grid_point(lon1, lat1)
-
-            # Adjust temporal range limit based on spatial range
-            lon_range = abs(orig_lon1 - orig_lon0)
-            lat_range = abs(lat1 - lat0)
-            area_range = lon_range * lat_range
-
-            if (lon_range > LON_RANGE_LIMIT and lat_range > LAT_RANGE_LIMIT) or (area_range > AREA_LIMIT):
-                # Large spatial range, limit to one month of data
-                end_date = start_date + pd.DateOffset(months=1) - timedelta(days=1)
-            elif (end_date - start_date).days > timeLimit:
-                # Smaller spatial range, limit to one year of data
-                end_date = start_date + timedelta(days=timeLimit)
-
-            if lon0 > lon1 and np.sign(orig_lon0) == np.sign(orig_lon1):
-                # Swap if lon0 > lon1 but the same sign
-                lon0, lon1 = lon1, lon0
-                orig_lon0, orig_lon1 = orig_lon1, orig_lon0
-
-            if np.sign(orig_lon0) != np.sign(orig_lon1):
-                # Requested area crosses the zero meridian
-                if orig_lon1 < 0:
-                    # Swap if orig_lon1 < 0 and now 180 < lon1 < 360
-                    lon0, lon1 = lon1, lon0
-                    orig_lon0, orig_lon1 = orig_lon1, orig_lon0
-
-                subset1 = dz.sel(lon=slice(lon0, 360), lat=slice(lat0, lat1), date=slice(start_date, end_date))
-                subset2 = dz.sel(lon=slice(0, lon1), lat=slice(lat0, lat1), date=slice(start_date, end_date))
-                data_subset = xr.concat([subset1, subset2], dim='lon')
-            else:
-                # Requested area doesn't cross the zero meridian
-                data_subset = dz.sel(lon=slice(lon0, lon1), lat=slice(lat0, lat1), date=slice(start_date, end_date))
-
-            out_file = (out_file + '_' + deg2str(lon0, True, orig_lon0<=-179.875) + '_' + deg2str(lat0, False) +
-                        '_' + deg2str(lon1, True, orig_lon1<=-179.875) + '_' + deg2str(lat1, False) +
-                        '_' + 'BBOX' + '_' + str(start_date.date()) + '_' + str(end_date.date()))
-
-        if data_subset.nbytes == 0:
-            raise HTTPException(
-                status_code=400, detail="No data available for the given parameters.")
-
-        df = data_subset.to_dataframe().reset_index()
-        mask = df['lon'] > 180
-        df.loc[mask, 'lon'] = df.loc[mask, 'lon'] - 360
-        df = df[['lon', 'lat', 'date'] +
-                variables].dropna(how='all', subset=variables)
-
-        if df.empty:
-            raise HTTPException(
-                status_code=400, detail="No data available after removing rows with NA values.")
-
-        # if 'date' in df.columns:
-        df['date'] = df['date'].apply(
-            lambda x: x.isoformat() if not pd.isnull(x) else '')
-        ##df.replace([np.inf, -np.inf], np.nan, inplace=True)  # Replace infinite values with NaN
-        ##df.fillna("", inplace=True)  # Replace NaN values with None #not "null"
-        # return df #Pandas version
-        return out_file, pl.from_pandas(df)
-
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    # global dz # old use 'sst_anomaly.zarr', add sst -> mhw.zarr
+    config.dz = xr.open_zarr('mhw.zarr', chunks='auto',
+                             group='anomaly', decode_times=True)
+    config.gridSz = 0.25
+    config.timeLimit = 365
+    config.LON_RANGE_LIMIT = 90
+    config.LAT_RANGE_LIMIT = 90
+    config.AREA_LIMIT = config.LON_RANGE_LIMIT * config.LAT_RANGE_LIMIT
 
 
 class MHWResponse(BaseModel):
@@ -229,10 +111,11 @@ async def read_mhw(
     * Bounding-box > 90x90 in degrees: 1-month time-span limitation: e.g. /api/mhw?lon0=-180&lon1&=180&lat0=-90&lat1=90&start=2021-01-01
     """
 
-    _, df = await process_mhw_data(lon0, lat0, lon1, lat1, start, end, append)
-    ##return JSONResponse(content=df.to_dict(orient='records')) #cannot handle NA when JSONResponse
+    _, df = await process_mhw_data(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1, start=start, end=end, append=append)
+    # return JSONResponse(content=df.to_dict(orient='records')) #cannot handle NA when JSONResponse
     # return JSONResponse(content=json.loads(df.to_json(orient='records'))) # work version in Pandas
     return JSONResponse(content=df.to_dicts())
+
 
 @app.get("/api/mhw/csv", response_class=Response, tags=["Marine Heatwave"], summary="Query MHW data as CSV")
 async def read_mhw_csv(
@@ -259,9 +142,52 @@ async def read_mhw_csv(
     * Bounding-box > 90x90 in degrees: 1-month time-span limitation: e.g. /api/mhw?lon0=-180&lon1&=180&lat0=-90&lat1=90&start=2021-01-01
     """
 
-    out_file, df = await process_mhw_data(lon0, lat0, lon1, lat1, start, end, append)
+    out_file, df = await process_mhw_data(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1, start=start, end=end, append=append)
     temp_file = NamedTemporaryFile(delete=False)
     # df.to_csv(temp_file.name, index=False) #Pandas solution, work
-    df.write_csv(temp_file.name) #polars version
+    df.write_csv(temp_file.name)  # polars version
 
     return FileResponse(temp_file.name, media_type="text/csv", filename=out_file+".csv")
+
+
+@app.get("/api/mhw/plot", tags=["Marine Heatwave"], summary="Plot SST or SST Anomalies climatology as PNG")
+async def climatology(
+    bbox: str = Query(..., description="Bounding-box (x0,y0,x1,y1),(...). Multi-bbox is allowed and x1, y1 can be skipped as point"),
+    period: str = Query(..., description="Time period %Y%m%d-%Y%m%d,... Multi-period is allowed, and %m:month %d:day can be skipped"),
+    sstvar: Optional[str] = Query(
+        None, description="Plot climatology for sst(default): SST or sst_anomaly: SST Anomalies"),
+    mode: Optional[str] = Query(
+        None, description="Plot series(default): time-series or month: average by month of {sstvar} throughout {period}"),
+    palette: Optional[str] = Query(
+        None, description="Customize color plate for each {bbox} if {mode} is 'series' or for each {period} if {mode} is 'month'.")
+):
+    """
+    Plot SST or SST Anomalies climatology (in PNG).
+    """
+    if not mode or mode.strip() not in ['month', 'series']:
+        mode = 'series'
+
+    if mode == 'month':
+        bbox_list = bbox.strip('()').split('),(')
+        bbox_coords = [float(coord) for coord in bbox_list[0].split(',')]
+        if len(bbox_coords) == 2:
+            lon0, lat0, lon1, lat1 = bbox_coords[0], bbox_coords[1], None, None
+        elif len(bbox_coords) == 4:
+            lon0, lat0, lon1, lat1 = bbox_coords
+        else:
+            raise HTTPException(
+                status_code=400, detail="Invalid bounding box format. Must contain 2 or 4 coordinates.")
+
+        buf = await month_climatology(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1, period=period, sstvar=sstvar, palette=palette)
+
+    else:
+        if period == "all":
+            start = '1982-01-01'
+            end = str((datetime.today() - pd.DateOffset(months=1)
+                       ).replace(day=1).date())
+        else:
+            start, end = period2date(period.strip().split(',')[0])
+
+        buf = await region_climatology(bbox, start, end, sstvar, palette)
+
+    return StreamingResponse(buf, media_type="image/png")
