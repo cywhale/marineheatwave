@@ -11,7 +11,7 @@ Jacox, Alexander, Bograd, and Scott (2020), Thermal Displacement by Marine Heatw
 https://eco.odb.ntu.edu.tw/api/swagger
 
 
-#### Usage
+#### Endpoint: /api/mhw
 
 ###### One-point MHWs without time-span limitation:
 
@@ -30,13 +30,30 @@ https://eco.odb.ntu.edu.tw/api/swagger
 
 1. level: Severity of MHWs (ref: Hobday et al., 2018) 0 - 4: None, Moderate, Strong, Severe, Extreme
 
-2. sst_anomaly: Monthly SST Anomalies
+2. sst: Monthly SST
 
-3. td: Thermal Displacement (ref: Jacox et al., 2020)
+3. sst_anomaly: Monthly SST Anomalies
+
+4. td: Thermal Displacement (ref: Jacox et al., 2020)
     
 - e.g. https://eco.odb.ntu.edu.tw/api/mhw?lon0=135&lat0=15&append=sst_anomaly,level (default is level)
 
 - The parameters lon1, lat1, start, end, and append are optional which can be none.
+
+#### /api/mhw/csv
+
+- The same usage as /api/mhw, but in CSV file response
+
+#### /api/mhw/plot
+
+- parameters see: https://eco.odb.ntu.edu.tw/api/swagger
+
+- Note that wider time/spatial span specified by {period} and {bbox} lead to much slower response.
+
+- {mode} = series: Time-series e.g. /api/mhw/plot?bbox=(-90,-10,-80,0),(-150,-5,-90,5)&period=2015-202306&sstvar=sst_anomaly
+
+- {mode} = month: Month climatology. /api/mhw/plot?bbox=(-90,-60,0,60)&sstvar=sst&period=1982-2011,2012-2021,2022,2023&mode=month
+
 
 #### Other resources
 

@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Marine Heatwaves</title>
+    <style id="themeStyle">
+        body { background-color: white; color: black; }
+        /* Add more light-theme styles here */
+    </style>
+</head>
+<body>
+    <h1>Marine Heatwaves</h1>
+    <label for="themeSwitch">Theme: </label>
+    <select id="themeSwitch">
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+    </select>
+
+    <label for="languageSwitch">Language: </label>
+    <select id="languageSwitch">
+        <option value="en">English</option>
+        <option value="cn">Traditional Chinese</option>
+    </select>
+
+    <h2>Input Parameters</h2>
+
+    <label for="startDate">Start Date: </label>
+    <input type="date" id="startDate">
+
+    <label for="endDate">End Date: </label>
+    <input type="date" id="endDate">
+
+    <label for="lon0">Longitude Start: </label>
+    <input type="number" min="-180" max="180" id="lon0" required>
+
+    <label for="lon1">Longitude End: </label>
+    <input type="number" min="-180" max="180" id="lon1">
+
+    <label for="lat0">Latitude Start: </label>
+    <input type="number" min="-90" max="90" id="lat0" required>
+
+    <label for="lat1">Latitude End: </label>
+    <input type="number" min="-90" max="90" id="lat1">
+
+    <label for="dataVariables">Data Variables: </label>
+    <select multiple id="dataVariables">
+        <option value="sst_anomaly">Monthly SST Anomalies</option>
+        <option value="level">Monthly MHW level</option>
+        <option value="td">Thermal Displacement</option>
+    </select>
+
+    <button id="downloadButton">Download</button>
+
+    <div id="message"></div>
+
+    <footer> <!-- Add your affiliation text here --> </footer>
+
+    <script>
+        const themeSwitch = document.querySelector('#themeSwitch');
+        themeSwitch.addEventListener('change', function() {
+            let theme = this.value;
+            let themeStyle = document.querySelector('#themeStyle');
+            if (theme === 'dark') {
+                themeStyle.innerHTML = `
+                    body { background-color: black; color: white; }
+                    /* Add more dark-theme styles here */
+                `;
+            } else {
+                themeStyle.innerHTML = `
+                    body { background-color: white; color: black; }
+                    /* Add more light-theme styles here */
+                `;
+            }
+        });
+
+        // Set default date values
+        let startDate = document.querySelector('#startDate');
+        let endDate = document.querySelector('#endDate');
+        let now = new Date();
+        endDate.valueAsDate = now;
+        now.setMonth(now.getMonth() - 1);
+        now.setDate(1);
+        startDate.valueAsDate = now;
+
+        const downloadButton = document.querySelector('#downloadButton');
+        downloadButton.addEventListener('click', async function() {
+            const lon0 = document.querySelector('#lon0').value;
+            const lon1 = document.querySelector('#lon1').value;
+            const lat0 = document.querySelector('#lat0').value;
+            const lat1 = document.querySelector('#lat1').value;
+            const start = document.querySelector('#startDate').value;
+            const end = document.querySelector('#endDate').value;
+            const dataVariables = Array.from(document.querySelector('#dataVariables').selectedOptions).map(option => option.value);
+            
+            const url = `https://eco.odb.ntu.edu.tw/api/mhw/csv?lon0=${lon0}&lat0=${lat0}${lon1 ? '&lon1=' + lon1 : ''}${lat1 ? '&lat1=' + lat1 : ''}${start ? '&start=' + start : ''}${end ? '&end=' + end : ''}${dataVariables.length > 0 ? '&append=' + dataVariables.join(',') : ''}`;
+
+            try {
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const message = document.querySelector('#message');
+                message.textContent = 'Download OK';
+            } catch (e) {
+                const message = document.querySelector('#message');
+                message.textContent = 'Download Failed: ' + e;
+            }
+        });
+    </script>
+</body>
+</html>

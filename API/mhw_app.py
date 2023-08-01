@@ -162,7 +162,12 @@ async def climatology(
         None, description="Customize color plate for each {bbox} if {mode} is 'series' or for each {period} if {mode} is 'month'.")
 ):
     """
-    Plot SST or SST Anomalies climatology (in PNG).
+    Plot SST or SST Anomalies climatology (in PNG)
+
+    #### Usage
+    * Note that wider time/spatial span specified by {period} and {bbox} lead to much slower response.
+    * {mode} = series: Time-series e.g. /api/mhw/plot?bbox=(-90,-10,-80,0),(-150,-5,-90,5)&period=2015-202306&sstvar=sst_anomaly
+    * {mode} = month: Month climatology. /api/mhw/plot?bbox=(-90,-60,0,60)&sstvar=sst&period=1982-2011,2012-2021,2022,2023&mode=month
     """
     if not mode or mode.strip() not in ['month', 'series']:
         mode = 'series'
