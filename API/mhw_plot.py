@@ -139,11 +139,11 @@ async def month_climatology(lon0: float, lat0: float, lon1: Optional[float] = No
     else:
         ylab = 'SST Anomaly'
 
-    ax.legend()
+    ax.legend(loc='upper right')
     ax.set_xlabel('Month')
     ax.set_ylabel('Average ' + ylab)
     ax.set_title(
-        f"Average Monthly {ylab} at Lon: {str(lon0) if not lon1 else str(lon0) + ' - ' + str(lon1)}, Lat: {str(lat0) if not lat1 else str(lat0) + ' - ' + str(lat1)}")
+        f"{ylab} Month Climatology at Lon: {str(lon0) if not lon1 else str(lon0) + ' - ' + str(lon1)}, Lat: {str(lat0) if not lat1 else str(lat0) + ' - ' + str(lat1)}")
     ax.set_xticks(np.arange(1, 13))
     ax.set_xticklabels(['Jan', 'Feb', 'Mar', 'Apr',
                         'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'])
@@ -209,12 +209,17 @@ async def region_climatology(bbox: str, start: str, end: str, sstvar: Optional[s
     # Increase the length of the major ticks
     ax.tick_params(which='major', length=10)
 
-    # Only display labels for every 5th major tick
-    for i, label in enumerate(ax.xaxis.get_majorticklabels()):
-        if int(label.get_text()) % 5 != 0:
-            label.set_visible(False)
+    # Calculate the range of years in the data
+    years_range = df['date'].dt.year().max() - df['date'].dt.year().min()
+
+    # Only display labels for every 5th major tick if years range > 5
+    if years_range >= 10:
+        for i, label in enumerate(ax.xaxis.get_majorticklabels()):
+           if int(label.get_text()) % 5 != 0:
+               label.set_visible(False)
 
     ax.tick_params(which='major', length=10)
+    ax.legend(loc='upper right')
     ax.set_xlabel("Year")
     ax.set_ylabel(ylab)
     ax.set_title(f"{ylab} Climatology from {start} to {end}")

@@ -143,7 +143,7 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
         if mode in ['area_mean_sst', 'area_mean_sst_anomaly', 'month_mean']:
             # Perform the averaging using xarray
             area_mean = data_subset.mean(dim=['lon', 'lat'], skipna=True).dropna(
-                dim='date', how='all').compute()
+                dim='date', how='all').compute(timeout='30s')
             # Run the compute-intensive tasks in the Dask cluster
             # future = client.submit(process_data_subset, data_subset) #, append=append
             # area_mean = await client.gather(future)
