@@ -4,62 +4,154 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Marine Heatwaves</title>
+    <script src="https://code.iconify.design/2/2.0.4/iconify.min.js"></script>
+    <style>
+.switch {
+            position: relative;
+            display: inline-block;
+            width: 46px;
+            height: 24px;
+        }
+        .switch input {display:none;}
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            -webkit-transition: .4s;
+            transition: .4s;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 21px;
+            width: 21px;
+            left: 2px;
+            bottom: 2px;
+            background-color: white;
+            -webkit-transition: .4s;
+            transition: .4s;
+        }
+        input:checked + .slider {
+            background-color: #2196F3;
+        }
+        input:focus + .slider {
+            box-shadow: 0 0 1px #2196F3;
+        }
+        input:checked + .slider:before {
+            -webkit-transform: translateX(21px);
+            -ms-transform: translateX(21px);
+            transform: translateX(21px);
+        }
+        /* Rounded sliders */
+        .slider.round {
+            border-radius: 24px;
+        }
+        .slider.round:before {
+            border-radius: 50%;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px;
+        }
+        h1 {
+            margin: 0;
+        }
+        .switch-wrapper {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            width: 100px;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            padding: 20px;
+        }
+        .row {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            width: 100%;
+            padding: 10px;
+        }
+        .dropdown {
+            width: 200px;
+        }
+        #download {
+            margin-left: 10px;
+        }
+    </style>
     <style id="themeStyle">
         body { background-color: white; color: black; }
         /* Add more light-theme styles here */
     </style>
 </head>
 <body>
-    <h1>Marine Heatwaves</h1>
-    <label for="themeSwitch">Theme: </label>
-    <select id="themeSwitch">
-        <option value="light">Light</option>
-        <option value="dark">Dark</option>
-    </select>
+    <div class="header">
+        <h1>Marine Heatwaves</h1>
+        <div>
+            <div class="switch-wrapper">
+                <span class="iconify" data-icon="carbon:sun" data-inline="false"></span>
+                <label for="themeSwitch" class="switch">
+                    <input type="checkbox" id="themeSwitch">
+                    <span class="slider round"></span>
+                </label>
+                <span class="iconify" data-icon="carbon:moon" data-inline="false"></span>
+            </div>
 
-    <label for="languageSwitch">Language: </label>
-    <select id="languageSwitch">
-        <option value="en">English</option>
-        <option value="cn">Traditional Chinese</option>
-    </select>
+            <div class="switch-wrapper">
+                <img src="https://flagcdn.com/w20/gb.png" alt="English" width="20"/>
+                <label for="languageSwitch" class="switch">
+                    <input type="checkbox" id="languageSwitch">
+                    <span class="slider round"></span>
+                </label>
+                <img src="https://flagcdn.com/w20/tw.png" alt="Traditional Chinese" width="20"/>
+            </div>
+        </div>
+    </div>
 
-    <h2>Input Parameters</h2>
-
-    <label for="startDate">Start Date: </label>
-    <input type="date" id="startDate">
-
-    <label for="endDate">End Date: </label>
-    <input type="date" id="endDate">
-
-    <label for="lon0">Longitude Start: </label>
-    <input type="number" min="-180" max="180" id="lon0" required>
-
-    <label for="lon1">Longitude End: </label>
-    <input type="number" min="-180" max="180" id="lon1">
-
-    <label for="lat0">Latitude Start: </label>
-    <input type="number" min="-90" max="90" id="lat0" required>
-
-    <label for="lat1">Latitude End: </label>
-    <input type="number" min="-90" max="90" id="lat1">
-
-    <label for="dataVariables">Data Variables: </label>
-    <select multiple id="dataVariables">
-        <option value="sst_anomaly">Monthly SST Anomalies</option>
-        <option value="level">Monthly MHW level</option>
-        <option value="td">Thermal Displacement</option>
-    </select>
-
-    <button id="downloadButton">Download</button>
-
-    <div id="message"></div>
-
-    <footer> <!-- Add your affiliation text here --> </footer>
-
+    <div class="container">
+        <div class="row">
+            <label for="startDate">Start date:</label>
+            <input type="date" id="startDate">
+            <label for="endDate">End date:</label>
+            <input type="date" id="endDate">
+        </div>
+        <div class="row">
+            <label for="lon0">Longitude 0:</label>
+            <input type="number" id="lon0" min="-180" max="180" step="any">
+            <label for="lon1">Longitude 1:</label>
+            <input type="number" id="lon1" min="-180" max="180" step="any">
+        </div>
+        <div class="row">
+            <label for="lat0">Latitude 0:</label>
+            <input type="number" id="lat0" min="-90" max="90" step="any">
+            <label for="lat1">Latitude 1:</label>
+            <input type="number" id="lat1" min="-90" max="90" step="any">
+        </div>
+        <div class="row">
+            <select id="dataVariables" class="dropdown" multiple>
+                <option value="sst_anomaly">Monthly SST Anomalies</option>
+                <option value="level">Monthly MHW level</option>
+                <option value="td">Themal Displacement</option>
+            </select>
+            <button id="downloadbtn">Download</button>
+        </div>
+    </div>
+    
     <script>
+       // Add your existing JavaScript here...
         const themeSwitch = document.querySelector('#themeSwitch');
         themeSwitch.addEventListener('change', function() {
-            let theme = this.value;
+            let theme = this.checked ? 'dark' : 'light';
             let themeStyle = document.querySelector('#themeStyle');
             if (theme === 'dark') {
                 themeStyle.innerHTML = `
@@ -74,6 +166,10 @@
             }
         });
 
+        const languageSwitch = document.querySelector('#languageSwitch');
+        languageSwitch.addEventListener('change', function() {
+            // TODO: Implement language switch functionality
+        });
         // Set default date values
         let startDate = document.querySelector('#startDate');
         let endDate = document.querySelector('#endDate');
@@ -83,8 +179,7 @@
         now.setDate(1);
         startDate.valueAsDate = now;
 
-        const downloadButton = document.querySelector('#downloadButton');
-        downloadButton.addEventListener('click', async function() {
+        document.getElementById('downloadbtn').addEventListener('click', async function() {
             const lon0 = document.querySelector('#lon0').value;
             const lon1 = document.querySelector('#lon1').value;
             const lat0 = document.querySelector('#lat0').value;
@@ -95,16 +190,19 @@
             
             const url = `https://eco.odb.ntu.edu.tw/api/mhw/csv?lon0=${lon0}&lat0=${lat0}${lon1 ? '&lon1=' + lon1 : ''}${lat1 ? '&lat1=' + lat1 : ''}${start ? '&start=' + start : ''}${end ? '&end=' + end : ''}${dataVariables.length > 0 ? '&append=' + dataVariables.join(',') : ''}`;
 
-            try {
-                const response = await fetch(url);
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const message = document.querySelector('#message');
-                message.textContent = 'Download OK';
-            } catch (e) {
-                const message = document.querySelector('#message');
-                message.textContent = 'Download Failed: ' + e;
+            const response = await fetch(url);
+
+            if (response.ok) {
+                const blob = await response.blob();
+                const downloadUrl = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = downloadUrl;
+                a.download = 'data.csv';
+                document.body.appendChild(a);
+                a.click(); 
+                document.body.removeChild(a);
+            } else {
+                console.error('Download failed:', response.status, response.statusText);
             }
         });
     </script>
