@@ -96,7 +96,7 @@ async def read_mhw(
     lat1: Optional[float] = Query(
         None, description="Maximum latitude, range: [-90, 90]"),
     start: Optional[date] = Query(
-        None, description="Start date of MHWs to query, minimum is 1982-02-01"),
+        None, description="Start date of MHWs to query, minimum is 1982-01-01"),
     end: Optional[date] = Query(
         None, description="End date of MHWs to query, maximum is one month before the current date"),
     append: Optional[str] = Query(
@@ -127,7 +127,7 @@ async def read_mhw_csv(
     lat1: Optional[float] = Query(
         None, description="Maximum latitude, range: [-90, 90]"),
     start: Optional[date] = Query(
-        None, description="Start date of MHWs to query, minimum is 1982-02-01"),
+        None, description="Start date of MHWs to query, minimum is 1982-01-01"),
     end: Optional[date] = Query(
         None, description="End date of MHWs to query, maximum is one month before the current date"),
     append: Optional[str] = Query(

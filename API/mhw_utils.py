@@ -20,9 +20,9 @@ def deg2str(value, isLon=True, oriNeg=False, roundTo=3):
 def to_nearest_grid_point(lon: float, lat: float) -> tuple:
     mlon = 180 if lon > 180 else (-180 if lon < -180 else lon)
     mlat = 90 if lat > 90 else (-90 if lat < -90 else lat)
+    mlon = mlon + 360 if mlon < 0 else mlon
     grid_lon = round(mlon * 4) / 4
     grid_lat = round(mlat * 4) / 4
-    grid_lon = grid_lon + 360 if grid_lon < 0 else grid_lon
     return (grid_lon, grid_lat)
 
 
@@ -83,12 +83,12 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
         orig_lon0, orig_lon1 = lon0, lon1
         lon0, lat0 = to_nearest_grid_point(lon0, lat0)
 
-        if lon1 is None or lat1 is None:
+        if lon1 is None or lat1 is None or (orig_lon0 == orig_lon1 and lat0 == lat1):
             # Only one point, no date range limitation
             out_file = (out_file + '_' + deg2str(lon0, True, orig_lon0 <= -179.875) + '_' + deg2str(lat0, False) +
                         '_' + 'Point' + '_' + str(start_date.date()) + '_' + str(end_date.date()))
-            data_subset = config.dz.sel(lon=slice(lon0, lon0+config.gridSz-0.01), lat=slice(
-                lat0, lat0+config.gridSz-0.01), date=slice(start_date, end_date))
+            data_subset = config.dz.sel(lon=slice(lon0-0.5*config.gridSz, lon0+0.5*config.gridSz-0.001), lat=slice(
+                lat0-0.5*config.gridSz, lat0+0.5*config.gridSz-0.001), date=slice(start_date, end_date))
 
         else:
             # Bounding box, 1 month or 1 year date range limitation
