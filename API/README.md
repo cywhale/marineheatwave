@@ -2,6 +2,8 @@
 
 Marine heatwaves (MHWs) evaluated from 0.25-degree gridded NOAA OISST v2.1
 
+[![DOI](https://zenodo.org/badge/doi/10.5281/zenodo.8250030.svg)](https://doi.org/10.5281/zenodo.8250030)
+
 #### Reference
 
 Jacox, Alexander, Bograd, and Scott (2020), Thermal Displacement by Marine Heatwaves, Nature, 584, 82–86, doi:10.1038/s41586-020-2534-z",
