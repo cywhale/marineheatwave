@@ -79,6 +79,9 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
             raise HTTPException(
                 status_code=400, detail="Invalid end date format")
 
+    if end_date < start_date:
+        start_date, end_date = end_date, start_date
+
     try:
         orig_lon0, orig_lon1 = lon0, lon1
         lon0, lat0 = to_nearest_grid_point(lon0, lat0)
@@ -92,6 +95,9 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
 
         else:
             # Bounding box, 1 month or 1 year date range limitation
+            if lat1 < lat0:
+              lat0, lat1 = lat1, lat0
+
             lon1, lat1 = to_nearest_grid_point(lon1, lat1)
 
             if (mode != 'area_mean_sst' and mode != 'area_mean_sst_anomaly' and mode != 'month_mean'):
