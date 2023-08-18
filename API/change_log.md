@@ -8,3 +8,5 @@ ODB API of Marine Heatwaves
 #### ver 0.1.3 Breaking fix bug conversion to [0,360]/pm2 pre-stop kill gunicorn processes
 
 #### ver 0.1.4 Breaking add SST/Climatology plot API/Use Dask-scheduler/worker
+
+#### ver 0.1.5 Add automation for update data from Postgres/Netcdf
