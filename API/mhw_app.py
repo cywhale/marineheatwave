@@ -111,10 +111,20 @@ async def read_mhw(
     * Bounding-box > 90x90 in degrees: 1-month time-span limitation: e.g. /api/mhw?lon0=-180&lon1&=180&lat0=-90&lat1=90&start=2021-01-01
     """
 
-    _, df = await process_mhw_data(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1, start=start, end=end, append=append)
-    # return JSONResponse(content=df.to_dict(orient='records')) #cannot handle NA when JSONResponse
-    # return JSONResponse(content=json.loads(df.to_json(orient='records'))) # work version in Pandas
-    return JSONResponse(content=df.to_dicts())
+    try:
+        _, df = await process_mhw_data(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1, start=start, end=end, append=append)
+        if df.is_empty():
+            raise HTTPException(status_code=400, detail="No data available for the given parameters.")
+        # return JSONResponse(content=df.to_dict(orient='records')) #cannot handle NA when JSONResponse
+        # return JSONResponse(content=json.loads(df.to_json(orient='records'))) # work version in Pandas
+        return JSONResponse(content=df.to_dicts())
+
+    except HTTPException as herr:
+        raise herr
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Internal server error. Please try it later or inform admin")
 
 
 @app.get("/api/mhw/csv", response_class=Response, tags=["Marine Heatwave"], summary="Query MHW data as CSV")
@@ -142,13 +152,23 @@ async def read_mhw_csv(
     * Bounding-box > 90x90 in degrees: 1-month time-span limitation: e.g. /api/mhw?lon0=-180&lon1&=180&lat0=-90&lat1=90&start=2021-01-01
     """
 
-    out_file, df = await process_mhw_data(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1, start=start, end=end, append=append)
-    temp_file = NamedTemporaryFile(delete=False)
-    # df.to_csv(temp_file.name, index=False) #Pandas solution, work
-    df.write_csv(temp_file.name)  # polars version
+    try:
+        out_file, df = await process_mhw_data(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1, start=start, end=end, append=append)
+        if df.is_empty():
+            raise HTTPException(status_code=400, detail="No data available for the given parameters.")
 
-    return FileResponse(temp_file.name, media_type="text/csv", filename=out_file+".csv")
+        temp_file = NamedTemporaryFile(delete=False)
+        # df.to_csv(temp_file.name, index=False) #Pandas solution, work
+        df.write_csv(temp_file.name)  # polars version
 
+        return FileResponse(temp_file.name, media_type="text/csv", filename=out_file+".csv")
+
+    except HTTPException as herr:
+        raise herr
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Internal server error. Please try it later or inform admin")
 
 @app.get("/api/mhw/plot", tags=["Marine Heatwave"], summary="Plot SST or SST Anomalies climatology as PNG")
 async def climatology(
