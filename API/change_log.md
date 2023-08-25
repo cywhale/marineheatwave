@@ -10,3 +10,5 @@ ODB API of Marine Heatwaves
 #### ver 0.1.4 Breaking add SST/Climatology plot API/Use Dask-scheduler/worker
 
 #### ver 0.1.5 Add automation for update data from Postgres/Netcdf
+
+#### ver 0.1.6 small fix input lon/lat within a 0.25-grid that cause no data when slicing

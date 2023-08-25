@@ -28,6 +28,7 @@ def to_nearest_grid_point(lon: float, lat: float) -> tuple:
 
 def output_df(df, isoTime=False):
     if df.empty:
+        # return pl.from_pandas(df)
         raise HTTPException(
             status_code=400, detail="No data available after removing rows with NA values.")
 
@@ -84,20 +85,45 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
 
     try:
         orig_lon0, orig_lon1 = lon0, lon1
-        lon0, lat0 = to_nearest_grid_point(lon0, lat0)
 
-        if lon1 is None or lat1 is None or (orig_lon0 == orig_lon1 and lat0 == lat1):
+        if lon1 is None or lat1 is None or (lon0 == lon1 and lat0 == lat1) or (abs(lat1 - lat0) < config.gridSz and abs(lon1 - lon0) < config.gridSz):
             # Only one point, no date range limitation
+            lon0, lat0 = to_nearest_grid_point(lon0, lat0)
+
             out_file = (out_file + '_' + deg2str(lon0, True, orig_lon0 <= -179.875) + '_' + deg2str(lat0, False) +
                         '_' + 'Point' + '_' + str(start_date.date()) + '_' + str(end_date.date()))
-            data_subset = config.dz.sel(lon=slice(lon0-0.5*config.gridSz, lon0+0.5*config.gridSz-0.001), lat=slice(
-                lat0-0.5*config.gridSz, lat0+0.5*config.gridSz-0.001), date=slice(start_date, end_date))
+            data_subset = config.dz.sel(lon=slice(lon0, lon0+0.5*config.gridSz), lat=slice(
+                lat0, lat0+0.5*config.gridSz), date=slice(start_date, end_date))
 
         else:
             # Bounding box, 1 month or 1 year date range limitation
-            if lat1 < lat0:
-              lat0, lat1 = lat1, lat0
+            offset_lat = 0.0
+            offset_lon = 0.0
+            if lat1 == lat0 or abs(lat1 - lat0) < config.gridSz:
+                offset_lat = 0.5
+                #if lat0 <= lat1:
+                #    lat0 = lat0 - 0.5*config.gridSz - 0.001
+                #    lat1 = lat1 + 0.5*config.gridSz
+                #else:
+                #    lat0 = lat0 + 0.5*config.gridSz
+                #    lat1 = lat1 - 0.5*config.gridSz - 0.001
+                print("lat0, lat1 equal: ", lat0, lat1)
 
+            if lat1 < lat0:
+                lat0, lat1 = lat1, lat0
+
+            if lon1 == lon0 or abs(lon1 - lon0) < config.gridSz:
+                offset_lon = 0.5
+                #if lon0 <= lon1:
+                #    lon0 = lon0 - 0.5*config.gridSz - 0.001
+                #    lon1 = lon1 + 0.5*config.gridSz
+                #else:
+                #    lon0 = lon0 + 0.5*config.gridSz
+                #    lon1 = lon1 - 0.5*config.gridSz - 0.001
+                print("lon0, lon1 equal: ", lon0, lon1)
+
+            orig_lon0, orig_lon1 = lon0, lon1
+            lon0, lat0 = to_nearest_grid_point(lon0, lat0)
             lon1, lat1 = to_nearest_grid_point(lon1, lat1)
 
             if (mode != 'area_mean_sst' and mode != 'area_mean_sst_anomaly' and mode != 'month_mean'):
@@ -127,14 +153,14 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
                     orig_lon0, orig_lon1 = orig_lon1, orig_lon0
 
                 subset1 = config.dz.sel(lon=slice(lon0, 360), lat=slice(
-                    lat0, lat1), date=slice(start_date, end_date))
-                subset2 = config.dz.sel(lon=slice(0, lon1), lat=slice(
-                    lat0, lat1), date=slice(start_date, end_date))
+                    lat0, lat1+offset_lat*config.gridSz), date=slice(start_date, end_date))
+                subset2 = config.dz.sel(lon=slice(0, lon1+offset_lon*config.gridSz), lat=slice(
+                    lat0, lat1+offset_lat*config.gridSz), date=slice(start_date, end_date))
                 data_subset = xr.concat([subset1, subset2], dim='lon')
             else:
                 # Requested area doesn't cross the zero meridian
-                data_subset = config.dz.sel(lon=slice(lon0, lon1), lat=slice(
-                    lat0, lat1), date=slice(start_date, end_date))
+                data_subset = config.dz.sel(lon=slice(lon0, lon1+offset_lon*config.gridSz), lat=slice(
+                    lat0, lat1+offset_lat*config.gridSz), date=slice(start_date, end_date))
 
             out_file = (out_file + '_' + deg2str(lon0, True, orig_lon0 <= -179.875) + '_' + deg2str(lat0, False) +
                         '_' + deg2str(lon1, True, orig_lon1 <= -179.875) + '_' + deg2str(lat1, False) +

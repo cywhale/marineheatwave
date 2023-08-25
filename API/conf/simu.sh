@@ -10,10 +10,10 @@ dask-worker tcp://localhost:8786 &
 gunicorn mhw_app:app -w 4 -k uvicorn.workers.UvicornWorker -b 127.0.0.1:8020 --keyfile conf/privkey.pem --certfile conf/fullchain.pem --reload
 
 # kill process
-ps -ef | grep 'gunicorn' | grep -v grep | awk '{print $2}' | xargs -r kill -9
+ps -ef | grep 'mhw_app' | grep -v grep | awk '{print $2}' | xargs -r kill -9
 
 # kill dask
-kill $(ps aux | grep \'dask-scheduler\' | awk \'{print $2}\') && kill $(ps aux | grep \'dask-worker\' | awk \'{print $2}\')
+ps -ef | grep -w 'dask-scheduler' | grep -v grep | awk '{print $2}' | xargs -r kill -9 && ps -ef | grep -w 'dask-worker' | grep -v grep | awk '{print $2}' | xargs -r kill -9 && ps -ef | grep -w 'mhw_app' | grep -v grep | awk '{print $2}' | xargs -r kill -9
 
 # pm2 start
 pm2 start ./conf/ecosystem.config.js
