@@ -47,7 +47,6 @@ def generate_custom_openapi():
 
 app = FastAPI(docs_url=None)
 
-
 @app.get("/api/swagger/openapi.json", include_in_schema=False)
 async def custom_openapi():
     # app.openapi()) modify to customize openapi.json
@@ -170,7 +169,7 @@ async def read_mhw_csv(
     except Exception as e:
         raise HTTPException(status_code=500, detail="Internal server error. Please try it later or inform admin")
 
-@app.get("/api/mhw/plot", tags=["Marine Heatwave"], summary="Plot SST or SST Anomalies climatology as PNG")
+@app.get("/api/mhw/plot", tags=["MHW_plot"], summary="Plot SST or SST Anomalies climatology as PNG", include_in_schema=False)
 async def climatology(
     bbox: str = Query(..., description="Bounding-box (x0,y0,x1,y1),(...). Multi-bbox is allowed and x1, y1 can be skipped as point"),
     period: str = Query(..., description="Time period %Y%m%d-%Y%m%d,... Multi-period is allowed, and %m:month %d:day can be skipped"),
