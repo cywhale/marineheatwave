@@ -12,3 +12,5 @@ ODB API of Marine Heatwaves
 #### ver 0.1.5 Add automation for update data from Postgres/Netcdf
 
 #### ver 0.1.6 small fix input lon/lat within a 0.25-grid that cause no data when slicing
+
+#### ver 0.2.0 officially release as open data, remove polar-circle MHW grids/renew all data

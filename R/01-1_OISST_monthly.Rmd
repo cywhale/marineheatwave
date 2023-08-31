@@ -39,10 +39,10 @@ dest  <- "../data_src/oisst/daily/"
 #filename <- paste(fileprex, datei, "nc", sep=".")
 #oisstfile <- paste(baseurl, monthi, filename, sep="/")  
 
-yrng <- seq(1982,2023) #1982, 2022 #example here only evaluate duration at 2022 #current dataset includes 198109 - 202206 (update 202206)
+yrng <- seq(2023,2023) #1982, 2022 #example here only evaluate duration at 2022 #current dataset includes 198109 - 202206 (update 202206)
 curryr <- year(Sys.Date())
 currmo <- month(Sys.Date())
-startm <- 1 #1 #normally we evaluate 1-12 month. But here we only test 2 month: Apr, May, 2022
+startm <- 7 #1 #normally we evaluate 1-12 month. But here we only test 2 month: Apr, May, 2022
 
 # return days of month
 mdayx <- function (yr, month, mday=c(31,28,31,30,31,30,31,31,30,31,30,31)) {
