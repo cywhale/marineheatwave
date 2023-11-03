@@ -47,16 +47,16 @@ def generate_custom_openapi():
 
 app = FastAPI(docs_url=None)
 
-@app.get("/api/swagger/openapi.json", include_in_schema=False)
+@app.get("/api/swagger/mhw/openapi.json", include_in_schema=False)
 async def custom_openapi():
     # app.openapi()) modify to customize openapi.json
     return JSONResponse(generate_custom_openapi())
 
 
-@app.get("/api/swagger", include_in_schema=False)
+@app.get("/api/swagger/mhw", include_in_schema=False)
 async def custom_swagger_ui_html():
     return get_swagger_ui_html(
-        openapi_url="/api/swagger/openapi.json",  # app.openapi_url
+        openapi_url="/api/swagger/mhw/openapi.json",  # app.openapi_url
         title=app.title
     )
 
@@ -74,6 +74,13 @@ async def startup():
     config.LON_RANGE_LIMIT = 90
     config.LAT_RANGE_LIMIT = 90
     config.AREA_LIMIT = config.LON_RANGE_LIMIT * config.LAT_RANGE_LIMIT
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    # Code to run when the application shuts down
+    print("Application is shutting down!")
+    client.close()
 
 
 class MHWResponse(BaseModel):
