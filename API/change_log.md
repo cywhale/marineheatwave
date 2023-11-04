@@ -16,3 +16,6 @@ ODB API of Marine Heatwaves
 #### ver 0.2.0 officially release as open data, remove polar-circle MHW grids/renew all data
 
     -- change to pipenv, modify pm2 management script
+
+#### ver 0.2.1 re-strcture project and use pipenv, fix update_mhw download bugs
+

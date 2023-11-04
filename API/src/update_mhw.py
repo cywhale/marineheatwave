@@ -1,15 +1,17 @@
 import pandas as pd
 import xarray as xr
 import numpy as np
-import requests, os
+import calendar, requests, os  # noqa: E401
 from sqlalchemy import create_engine
 from dotenv import load_dotenv
 from urllib.parse import quote 
 
 # Define the paths and connection strings
-ZARR_PATH = 'mhw.zarr'
-DATA_PATH = 'tmp/'
+ZARR_PATH = 'data/mhw.zarr'
+DATA_PATH = 'data/tmp/'
 RECHUNK = False  #note, if re-chunk needed, it will overwrite whole datasets
+TEST_Download = True
+TEST_date= '2023-09-01'
 
 load_dotenv()
 DBUSER = os.getenv('DBUSER')
@@ -31,28 +33,35 @@ def download_noaa_data(date, dest_dir):
     - filename (str) if successful, None otherwise
     """
     year_month = date[:7].replace('-', '')
-    filename = f"oisst-avhrr-v02r01.{year_month}01.nc"
-    file_path = os.path.join(dest_dir, filename)
+    year = int(year_month[:4])
+    month = int(year_month[4:6])
+    _, num_days = calendar.monthrange(year, month)
 
-    if os.path.exists(file_path):
-        print(f"File {filename} already exists in the destination directory.")
-        return file_path
-
-    url = f"https://www.ncei.noaa.gov/data/sea-surface-temperature-optimum-interpolation/v2.1/access/avhrr/{year_month}/{filename}"
-
-    response = requests.get(url, stream=True)
+    downloaded_files = []
     
-    if response.status_code != 200:
-        print(f"Failed to download data from {url}. Error: {response.text}")
-        return None
+    for day in range(1, num_days + 1):
+        filename = f"oisst-avhrr-v02r01.{year_month}{day:02d}.nc"
+        file_path = os.path.join(dest_dir, filename)
 
-    with open(file_path, 'wb') as file:
-        for chunk in response.iter_content(chunk_size=8192):
-            file.write(chunk)
+        if os.path.exists(file_path):
+            print(f"File {filename} already exists in the destination directory.")
+            downloaded_files.append(file_path)
+            continue
 
-    print(f"Downloaded {filename} to {dest_dir}")
-    return file_path
+        url = f"https://www.ncei.noaa.gov/data/sea-surface-temperature-optimum-interpolation/v2.1/access/avhrr/{year_month}/{filename}"
 
+        response = requests.get(url, stream=True)
+        
+        if response.status_code == 200:
+            with open(file_path, 'wb') as file:
+                for chunk in response.iter_content(chunk_size=8192):
+                    file.write(chunk)
+            print(f"Downloaded {filename} to {dest_dir}")
+            downloaded_files.append(file_path)
+        else:
+            print(f"Failed to download data from {url}. Error: {response.status_code}")
+
+    return downloaded_files
 
 def append_to_zarr():
     dz = xr.open_zarr(ZARR_PATH, group='anomaly', decode_times=True)
@@ -98,15 +107,15 @@ def append_to_zarr():
             next_month_date = f"{last_date_in_zarr.year}-{last_date_in_zarr.month + 1:02}-01"
 
         # Download the NOAA data for the next month
-        filename = download_noaa_data(next_month_date, DATA_PATH)
+        filenames = download_noaa_data(next_month_date, DATA_PATH)
 
-        if filename is None:
+        if filenames is None or len(filenames) == 0:
             print("Error downloading NOAA data for date: ", next_month_date, ". Aborting update.")
             return
         
-        print("Download nc for the date: ", next_month_date, " and get file: ", filename)
+        print("Download nc for the date: ", next_month_date, " and get file: ", filenames)
 
-        ds_nc = xr.open_mfdataset(filename, parallel=True, chunks={'time': '500MB'})
+        ds_nc = xr.open_mfdataset(filenames, parallel=True, chunks={'time': '500MB'})
         msst = ds_nc["sst"].resample(time='1MS').mean()
         ds_msst = msst.compute()
         ds_msst = ds_msst.squeeze('zlev').rename({'time': 'date'}).drop('zlev')
@@ -145,7 +154,15 @@ def append_to_zarr():
 
 
 def main():
-    append_to_zarr()
+    if TEST_Download:
+        filenames = download_noaa_data(TEST_date, DATA_PATH)
+        if filenames is None or len(filenames) == 0:
+            print("Error downloading NOAA data for date: ", TEST_date, ". Aborting update.")
+            return        
+        print("Download nc for the date: ", TEST_date, " and get file: ", filenames)
+
+    else:    
+        append_to_zarr()
 
 
 if __name__ == "__main__":

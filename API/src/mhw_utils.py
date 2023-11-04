@@ -5,7 +5,7 @@ import numpy as np
 from fastapi import HTTPException
 from typing import Optional
 from datetime import date, datetime, timedelta
-import config
+import src.config as config
 
 
 def deg2str(value, isLon=True, oriNeg=False, roundTo=3):
