@@ -9,7 +9,7 @@ from typing import Optional
 from datetime import datetime
 import polars as pl
 from fastapi import HTTPException
-from mhw_utils import process_mhw_data
+from src.mhw_utils import process_mhw_data
 from io import BytesIO
 # from tempfile import NamedTemporaryFile
 

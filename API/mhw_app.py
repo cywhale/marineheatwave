@@ -10,9 +10,9 @@ from typing import Optional, List
 from pydantic import BaseModel
 from datetime import date, datetime  # , timedelta
 from tempfile import NamedTemporaryFile
-from mhw_utils import process_mhw_data
-from mhw_plot import month_climatology, region_climatology, period2date
-import config
+from src.mhw_utils import process_mhw_data
+from src.mhw_plot import month_climatology, region_climatology, period2date
+import src.config as config
 # import json, dask
 # This is a more low-level way of setting up Dask for parallel computations, and it doesn't provide some of the additional features of Dask's own distributed scheduler, such as advanced task prioritization and data locality awareness.
 # from multiprocessing.pool import Pool
@@ -67,7 +67,7 @@ async def custom_swagger_ui_html():
 @app.on_event("startup")
 async def startup():
     # global dz # old use 'sst_anomaly.zarr', add sst -> mhw.zarr
-    config.dz = xr.open_zarr('mhw.zarr', chunks='auto',
+    config.dz = xr.open_zarr('data/mhw.zarr', chunks='auto',
                              group='anomaly', decode_times=True)
     config.gridSz = 0.25
     config.timeLimit = 365
