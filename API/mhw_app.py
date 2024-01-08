@@ -22,13 +22,11 @@ from dask.distributed import Client
 client = Client('tcp://localhost:8786')
 
 
-app = FastAPI(docs_url=None)
-
-
-@app.on_event("startup")
-async def startup():
-#@asynccontextmanager
-#async def lifespan(app: FastAPI):
+#app = FastAPI(docs_url=None)
+#@app.on_event("startup")
+#async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     # global dz # old use 'sst_anomaly.zarr', add sst -> mhw.zarr
     config.dz = xr.open_zarr('data/mhw.zarr', chunks='auto',
                              group='anomaly', decode_times=True)
@@ -37,19 +35,19 @@ async def startup():
     config.LON_RANGE_LIMIT = 90
     config.LAT_RANGE_LIMIT = 90
     config.AREA_LIMIT = config.LON_RANGE_LIMIT * config.LAT_RANGE_LIMIT
-#    yield
-#    print("Application is shutting down!")
-#    config.dz.close()
-#    client.close()
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    # Code to run when the application shuts down
+    yield
     print("Application is shutting down!")
+    config.dz.close()
     client.close()
 
+#@app.on_event("shutdown")
+#async def shutdown_event():
+#    # Code to run when the application shuts down
+#    print("Application is shutting down!")
+#    client.close()
 
-#app = FastAPI(docs_url=None, lifespan=lifespan)
+
+app = FastAPI(docs_url=None, lifespan=lifespan)
 
 
 def generate_custom_openapi():
@@ -116,7 +114,7 @@ async def read_mhw(
     end: Optional[date] = Query(
         None, description="End date of MHWs to query, maximum is one month before the current date"),
     append: Optional[str] = Query(
-        None, description="Data fields to append, separated by commas. Allowed fields: 'sst_anomaly', 'level', 'td'")
+        None, description="Data fields to append, separated by commas. Allowed fields: 'sst', 'sst_anomaly', 'level', 'td'")
 ):
     """
     Query MHW data by longitude/latitude/date (in JSON).
@@ -157,7 +155,7 @@ async def read_mhw_csv(
     end: Optional[date] = Query(
         None, description="End date of MHWs to query, maximum is one month before the current date"),
     append: Optional[str] = Query(
-        None, description="Data fields to append, separated by commas. Allowed fields: 'sst_anomaly', 'level', 'td'")
+        None, description="Data fields to append, separated by commas. Allowed fields: 'sst', 'sst_anomaly', 'level', 'td'")
 ):
     """
     Query MHW data by longitude/latitude/date (in csv).
