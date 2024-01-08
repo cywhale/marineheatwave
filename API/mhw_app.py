@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
+from contextlib import asynccontextmanager
 from typing import Optional, List
 from pydantic import BaseModel
 from datetime import date, datetime  # , timedelta
@@ -19,6 +20,36 @@ import src.config as config
 # dask.config.set(pool=Pool(4))
 from dask.distributed import Client
 client = Client('tcp://localhost:8786')
+
+
+app = FastAPI(docs_url=None)
+
+
+@app.on_event("startup")
+async def startup():
+#@asynccontextmanager
+#async def lifespan(app: FastAPI):
+    # global dz # old use 'sst_anomaly.zarr', add sst -> mhw.zarr
+    config.dz = xr.open_zarr('data/mhw.zarr', chunks='auto',
+                             group='anomaly', decode_times=True)
+    config.gridSz = 0.25
+    config.timeLimit = 365
+    config.LON_RANGE_LIMIT = 90
+    config.LAT_RANGE_LIMIT = 90
+    config.AREA_LIMIT = config.LON_RANGE_LIMIT * config.LAT_RANGE_LIMIT
+#    yield
+#    print("Application is shutting down!")
+#    config.dz.close()
+#    client.close()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    # Code to run when the application shuts down
+    print("Application is shutting down!")
+    client.close()
+
+
+#app = FastAPI(docs_url=None, lifespan=lifespan)
 
 
 def generate_custom_openapi():
@@ -45,8 +76,6 @@ def generate_custom_openapi():
     return app.openapi_schema
 
 
-app = FastAPI(docs_url=None)
-
 @app.get("/api/swagger/mhw/openapi.json", include_in_schema=False)
 async def custom_openapi():
     # app.openapi()) modify to customize openapi.json
@@ -62,25 +91,6 @@ async def custom_swagger_ui_html():
 
 ### Global variables ###
 ### move to config.py ##
-
-
-@app.on_event("startup")
-async def startup():
-    # global dz # old use 'sst_anomaly.zarr', add sst -> mhw.zarr
-    config.dz = xr.open_zarr('data/mhw.zarr', chunks='auto',
-                             group='anomaly', decode_times=True)
-    config.gridSz = 0.25
-    config.timeLimit = 365
-    config.LON_RANGE_LIMIT = 90
-    config.LAT_RANGE_LIMIT = 90
-    config.AREA_LIMIT = config.LON_RANGE_LIMIT * config.LAT_RANGE_LIMIT
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    # Code to run when the application shuts down
-    print("Application is shutting down!")
-    client.close()
 
 
 class MHWResponse(BaseModel):

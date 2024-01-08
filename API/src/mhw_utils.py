@@ -107,7 +107,7 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
                 #else:
                 #    lat0 = lat0 + 0.5*config.gridSz
                 #    lat1 = lat1 - 0.5*config.gridSz - 0.001
-                print("lat0, lat1 equal: ", lat0, lat1)
+                #print("lat0, lat1 equal: ", lat0, lat1)
 
             if lat1 < lat0:
                 lat0, lat1 = lat1, lat0

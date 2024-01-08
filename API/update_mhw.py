@@ -10,7 +10,7 @@ from urllib.parse import quote
 ZARR_PATH = 'data/mhw.zarr'
 DATA_PATH = 'data/tmp/'
 RECHUNK = False  #note, if re-chunk needed, it will overwrite whole datasets
-TEST_Download = True
+TEST_Download = False
 TEST_date= '2023-09-01'
 
 load_dotenv()
