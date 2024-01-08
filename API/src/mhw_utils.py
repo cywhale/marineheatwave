@@ -120,7 +120,7 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
                 #else:
                 #    lon0 = lon0 + 0.5*config.gridSz
                 #    lon1 = lon1 - 0.5*config.gridSz - 0.001
-                print("lon0, lon1 equal: ", lon0, lon1)
+                #print("lon0, lon1 equal: ", lon0, lon1)
 
             orig_lon0, orig_lon1 = lon0, lon1
             lon0, lat0 = to_nearest_grid_point(lon0, lat0)
