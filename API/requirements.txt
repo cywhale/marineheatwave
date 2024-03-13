@@ -1,4 +1,4 @@
-dask[compolete]==2024.3.0
+dask[complete]==2024.3.0
 distributed==2024.3.0
 fastapi==0.110.0
 gunicorn==21.2.0
