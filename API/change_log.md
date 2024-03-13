@@ -20,3 +20,4 @@ ODB API of Marine Heatwaves
 #### ver 0.2.1 re-strcture project and use pipenv, fix update_mhw download bugs
 
     -- move to FastAPI lifespan async method/small package upgrade
+    -- various package upgrade/fix lack of __init__.py

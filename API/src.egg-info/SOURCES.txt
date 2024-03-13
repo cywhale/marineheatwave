@@ -4,9 +4,17 @@ change_log.md
 mhw_app.py
 requirements.txt
 setup.py
+update_mhw.py
 conf/ecosystem.config.js
 conf/simu.sh
 conf/start_app.sh
+dev/read_mhw_db01.ipynb
+dev/read_sst_nc01.ipynb
+dev/sim_mhw_api01.ipynb
+src/__init__.py
+src/config.py
+src/mhw_plot.py
+src/mhw_utils.py
 src.egg-info/PKG-INFO
 src.egg-info/SOURCES.txt
 src.egg-info/dependency_links.txt
