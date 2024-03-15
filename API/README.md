@@ -15,10 +15,9 @@ Marine heatwaves (MHWs) evaluated from 0.25-degree gridded NOAA OISST v2.1
 
 #### Swagger API doc
 
-- https://eco.odb.ntu.edu.tw/api/swagger
+- [ODB Marine Heatwaves (MHW) API manual/online try-out](https://api.odb.ntu.edu.tw/hub/swagger?node=odb_mhw_v1)
 
-
-#### Endpoint: /api/mhw
+#### Usage: Endpoint /api/mhw
 
 ###### One-point MHWs without time-span limitation:
 
@@ -51,16 +50,11 @@ Marine heatwaves (MHWs) evaluated from 0.25-degree gridded NOAA OISST v2.1
 
 - The same usage as /api/mhw, but in CSV file response
 
-#### /api/mhw/plot
+#### Demo on <a href="https://eco.odb.ntu.edu.tw/pub/MHW/" target="_blank">ODB Marine Heatwaves</a>
 
-- parameters see: https://eco.odb.ntu.edu.tw/api/swagger
+<p align="center"><img src="https://eco.odb.ntu.edu.tw/pub/MHW/assets/202401_level.jpg" width=640 alt="Marine Heatwaves level 202401" /></p>
 
-- Note that wider time/spatial span specified by {period} and {bbox} lead to much slower response.
-
-- {mode} = series: Time-series e.g. /api/mhw/plot?bbox=(-90,-10,-80,0),(-150,-5,-90,5)&period=2015-202306&sstvar=sst_anomaly
-
-- {mode} = month: Month climatology. /api/mhw/plot?bbox=(-90,-60,0,60)&sstvar=sst&period=1982-2011,2012-2021,2022,2023&mode=month
-
+<p align="center"><em>Global marine heatwave levels at 0.25 degree grid for January 2024.</em></p>
 
 #### Other resources
 
