@@ -3,6 +3,7 @@
 * ODB MHW open data official website
 
   - https://eco.odb.ntu.edu.tw/pub/MHW
+  - [Open API](API/) 
   
 * Original reference by Jacox 2020 
 
@@ -14,9 +15,11 @@
     threshold (Extended Data Fig. 5). Our analysis differs from those used in some other studies in that 
     we used monthly averaged SST rather than daily data..." AND Here we do not implement "detrend" global trend in paper 
 
-  - original code ref (in Matlab): https://github.com/mjacox/Thermal_Displacement/
+  - Original code ref (in Matlab): https://github.com/mjacox/Thermal_Displacement/
+ 
+  - ODB Python version code: [yeh-tc/Python_project-Thermal_Displacement](https://github.com/yeh-tc/Python_project-Thermal_Displacement)
 
-  - code in R, and data use NOAA OISST v2.1: https://www.ncei.noaa.gov/data/sea-surface-temperature-optimum-interpolation/ 
+  - Other example code in R, and data use NOAA OISST v2.1: https://www.ncei.noaa.gov/data/sea-surface-temperature-optimum-interpolation/ 
 
 
 * Usage
