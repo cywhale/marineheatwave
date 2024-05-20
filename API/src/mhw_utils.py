@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from typing import Optional
 from datetime import date, datetime, timedelta
 import src.config as config
+import math
 
 
 def deg2str(value, isLon=True, oriNeg=False, roundTo=3):
@@ -21,8 +22,8 @@ def to_nearest_grid_point(lon: float, lat: float) -> tuple:
     mlon = 180 if lon > 180 else (-180 if lon < -180 else lon)
     mlat = 90 if lat > 90 else (-90 if lat < -90 else lat)
     mlon = mlon + 360 if mlon < 0 else mlon
-    grid_lon = round(mlon * 4) / 4
-    grid_lat = round(mlat * 4) / 4
+    grid_lon = math.floor(mlon * 4) / 4
+    grid_lat = math.floor(mlat * 4) / 4
     return (grid_lon, grid_lat)
 
 

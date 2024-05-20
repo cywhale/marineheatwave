@@ -22,3 +22,4 @@ ODB API of Marine Heatwaves
     -- move to FastAPI lifespan async method/small package upgrade
     -- various package upgrade/n2/fix lack of __init__.py
 
+#### ver 0.2.2 fix API gridded function inconsistent with original PostGIS database bug
