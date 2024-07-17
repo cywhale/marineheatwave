@@ -23,3 +23,5 @@ ODB API of Marine Heatwaves
     -- various package upgrade/n2/fix lack of __init__.py
 
 #### ver 0.2.2 fix API gridded function inconsistent with original PostGIS database bug
+
+    -- fix xr.open_mfdataset parallel=True cause core dump problem/append script using Geoserver api
