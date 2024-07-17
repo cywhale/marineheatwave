@@ -115,25 +115,32 @@ def append_to_zarr():
         
         print("Download nc for the date: ", next_month_date, " and get file: ", filenames)
 
-        ds_nc = xr.open_mfdataset(filenames, parallel=True, chunks={'time': '500MB'})
-        msst = ds_nc["sst"].resample(time='1MS').mean()
-        ds_msst = msst.compute()
-        ds_msst = ds_msst.squeeze('zlev').rename({'time': 'date'}).drop('zlev')
+        # ds_nc = xr.open_mfdataset(filenames, parallel=True, chunks={'time': '500MB'})
+        try:
+            with xr.open_mfdataset(filenames, parallel=False, chunks={'time': '500MB'}) as ds_nc:
+                msst = ds_nc["sst"].resample(time='1MS').mean()
+                ds_msst = msst.compute()
+                ds_msst = ds_msst.squeeze('zlev').rename({'time': 'date'}).drop('zlev')
+                print("Processing mean SST:", ds_nc)
 
-        # Check if the 'next_month_date' already exists in dz['date']
-        if np.datetime64(next_month_date) in dz['date'].values:
-            # Align the ds_msst Dataset with dz along 'lat' and 'lon'
-            # print(ds_msst)
-            # print("----debugging after align----")
-            ds_msst_aligned, _ = xr.align(ds_msst, dz['sst'], join='inner', exclude=['date'])
-            # print(ds_msst_aligned)
+                # Check if the 'next_month_date' already exists in dz['date']
+                if np.datetime64(next_month_date) in dz['date'].values:
+                    # Align the ds_msst Dataset with dz along 'lat' and 'lon'
+                    # print(ds_msst)
+                    # print("----debugging after align----")
+                    ds_msst_aligned, _ = xr.align(ds_msst, dz['sst'], join='inner', exclude=['date'])
+                    # print(ds_msst_aligned)
 
-            # Update the 'sst' values in dz for the specific date
-            dz['sst'].loc[dict(date=next_month_date)] = ds_msst_aligned.sel(date=next_month_date)
-        else:
-            # If 'next_month_date' doesn't exist in dz['date'], simply concatenate as before
-            dz['sst'] = xr.concat([dz['sst'], ds_msst], dim='date')
+                    # Update the 'sst' values in dz for the specific date
+                    dz['sst'].loc[dict(date=next_month_date)] = ds_msst_aligned.sel(date=next_month_date)
+                else:
+                    # If 'next_month_date' doesn't exist in dz['date'], simply concatenate as before
+                    dz['sst'] = xr.concat([dz['sst'], ds_msst], dim='date')
 
+        except Exception as e:
+            print("Error processing NetCDF files: ", e)
+            return
+        
         if RECHUNK:
             # Re-chunk and save to Zarr
             chunk_size_date = dz['level'].chunks[0][0]
