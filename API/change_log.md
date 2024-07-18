@@ -25,3 +25,5 @@ ODB API of Marine Heatwaves
 #### ver 0.2.2 fix API gridded function inconsistent with original PostGIS database bug
 
     -- fix xr.open_mfdataset parallel=True cause core dump problem/append script using Geoserver api
+
+#### ver 0.2.3 fix API month_mean (should not) mixed with area_mean method bug

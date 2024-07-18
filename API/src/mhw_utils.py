@@ -173,7 +173,7 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
 
         data_subset.load()
 
-        if mode in ['area_mean_sst', 'area_mean_sst_anomaly', 'month_mean']:
+        if mode in ['area_mean_sst', 'area_mean_sst_anomaly']:
             # Perform the averaging using xarray
             area_mean = data_subset.mean(dim=['lon', 'lat'], skipna=True).dropna(
                 dim='date', how='all').compute(timeout='30s')
@@ -182,6 +182,13 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
             # area_mean = await client.gather(future)
             df = area_mean[['date', append]].to_dataframe().reset_index()
             # df.dropna(subset=[append], inplace=True)
+            pl_df = output_df(df, False)
+
+        elif mode == 'month_mean':
+            # Segment the data by month first
+            monthly_means = data_subset.groupby('date.month').mean(dim=['lon', 'lat'], skipna=True).dropna(
+                dim='date', how='all').compute(timeout='30s')
+            df = monthly_means[['date', append]].to_dataframe().reset_index()
             pl_df = output_df(df, False)
 
         else:
