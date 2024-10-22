@@ -4,23 +4,23 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-distributed = "==2024.5.0"
-fastapi = "==0.111.0"
-gunicorn = "==22.0.0"
+distributed = "==2024.10.0"
+fastapi = "==0.115.2"
+gunicorn = "==23.0.0"
 matplotlib = "==3.8.4"
-numpy = "==1.26.4"
-polars = "==0.20.25"
-pydantic = "==2.7.1"
+numpy = "==2.1.2"
+polars = "==1.10.0"
+pydantic = "==2.9.2"
 python-dotenv = "==1.0.1"
-requests = "==2.31.0"
+requests = "==2.32.3"
 seaborn = "==0.13.2"
 sqlalchemy = "==2.0.30"
-uvicorn = "==0.29.0"
-xarray = "==2024.3.0"
-zarr = "==2.18.0"
-polars-lts-cpu = "==0.20.25"
-dask = {extras = ["complete"], version = "==2024.5.0"}
-pandas = {extras = ["pyarrow"], version = "==2.2.2"}
+uvicorn = "==0.32.0"
+xarray = "==2024.9.0"
+zarr = "==2.18.3"
+polars-lts-cpu = "==1.10.0"
+dask = {extras = ["complete"], version = "==2024.10.0"}
+pandas = {extras = ["pyarrow"], version = "==2.2.3"}
 
 [dev-packages]
 

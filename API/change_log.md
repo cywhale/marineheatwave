@@ -27,3 +27,4 @@ ODB API of Marine Heatwaves
     -- fix xr.open_mfdataset parallel=True cause core dump problem/append script using Geoserver api
 
 #### ver 0.2.3 fix API month_mean (should not) mixed with area_mean method bug
+#### ver 0.2.4 Try to shared dask worker leak by unique naming scheme for Dask tasks/major package upgrade (numpy v2)

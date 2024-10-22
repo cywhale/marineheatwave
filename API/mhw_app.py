@@ -18,9 +18,10 @@ import src.config as config
 # This is a more low-level way of setting up Dask for parallel computations, and it doesn't provide some of the additional features of Dask's own distributed scheduler, such as advanced task prioritization and data locality awareness.
 # from multiprocessing.pool import Pool
 # dask.config.set(pool=Pool(4))
-from dask.distributed import Client
-client = Client('tcp://localhost:8786')
-
+# from dask.distributed import Client
+# client = Client('tcp://localhost:8786')
+from src.dask_client_manager import get_dask_client
+client = get_dask_client("mhwapi")
 
 #app = FastAPI(docs_url=None)
 #@app.on_event("startup")
