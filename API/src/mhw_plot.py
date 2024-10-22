@@ -129,7 +129,7 @@ async def month_climatology(lon0: float, lat0: float, lon1: Optional[float] = No
             label = f"{start_year}-{end_year}"
 
         if not subset.is_empty():
-            monthly_avg = subset.groupby('month').agg(
+            monthly_avg = subset.group_by('month').agg(
                 pl.col(sstvar).mean()).sort('month')
             ax.plot(monthly_avg['month'],
                     monthly_avg[sstvar], color=color, label=label)

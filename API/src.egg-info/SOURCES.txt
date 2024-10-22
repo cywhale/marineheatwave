@@ -14,6 +14,7 @@ dev/read_sst_nc01.ipynb
 dev/sim_mhw_api01.ipynb
 src/__init__.py
 src/config.py
+src/dask_client_manager.py
 src/mhw_plot.py
 src/mhw_utils.py
 src.egg-info/PKG-INFO

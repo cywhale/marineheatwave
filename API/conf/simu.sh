@@ -7,7 +7,7 @@ dask worker tcp://localhost:8786 --memory-limit 8GB &
 
 # run API server
 ## localhost: gunicorn mhw_app:app -k uvicorn.workers.UvicornWorker -b 127.0.0.1:8030 --timeout 120
-gunicorn mhw_app:app -w 3 -k uvicorn.workers.UvicornWorker -b 127.0.0.1:8030 --keyfile conf/privkey.pem --certfile conf/fullchain.pem --reload --timeout 180
+gunicorn mhw_app:app -w 2 -k uvicorn.workers.UvicornWorker -b 127.0.0.1:8030 --keyfile conf/privkey.pem --certfile conf/fullchain.pem --reload --timeout 180
 
 # kill process
 ps -ef | grep 'mhw_app' | grep -v grep | awk '{print $2}' | xargs -r kill -9
