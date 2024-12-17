@@ -137,9 +137,13 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
                     # Large spatial range, limit to one month of data
                     end_date = start_date + \
                         pd.DateOffset(months=1) - timedelta(days=1)
-                elif (end_date - start_date).days > config.timeLimit:
-                    # Smaller spatial range, limit to one year of data
+                elif ((lon_range > config.LONG_TERM_RANGE and lat_range > config.LONG_TERM_RANGE) or (
+                      area_range > config.LONG_TERM_RANGE * config.LONG_TERM_RANGE)) and (
+                      end_date - start_date).days > config.timeLimit:
                     end_date = start_date + timedelta(days=config.timeLimit)
+                elif (end_date - start_date).days > config.LONG_TERM_LIMIT * 366:
+                    # Smaller spatial range, limit to one year of data
+                    end_date = start_date + timedelta(days=config.LONG_TERM_LIMIT * 366)
 
             if lon0 > lon1 and np.sign(orig_lon0) == np.sign(orig_lon1):
                 # Swap if lon0 > lon1 but the same sign

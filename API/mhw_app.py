@@ -32,9 +32,11 @@ async def lifespan(app: FastAPI):
     config.dz = xr.open_zarr('data/mhw.zarr', chunks='auto',
                              group='anomaly', decode_times=True)
     config.gridSz = 0.25
-    config.timeLimit = 365
+    config.timeLimit = 366
     config.LON_RANGE_LIMIT = 90
     config.LAT_RANGE_LIMIT = 90
+    config.LONG_TERM_RANGE = 10 # 10 * 10 degree for lon/lat in region
+    config.LONG_TERM_LIMIT = 10 # 10 years
     config.AREA_LIMIT = config.LON_RANGE_LIMIT * config.LAT_RANGE_LIMIT
     yield
     print("Application is shutting down!")
