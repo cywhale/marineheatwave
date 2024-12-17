@@ -28,3 +28,4 @@ ODB API of Marine Heatwaves
 
 #### ver 0.2.3 fix API month_mean (should not) mixed with area_mean method bug
 #### ver 0.2.4 Try to shared dask worker leak by unique naming scheme for Dask tasks/major package upgrade (numpy v2)
+#### ver 0.2.5 Add LONG_TERM_RANGE (10x10) and LONG_TERM_LIMIT (10yr) criteria/package upgrade
