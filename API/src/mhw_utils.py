@@ -140,10 +140,10 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
                 elif ((lon_range > config.LONG_TERM_RANGE and lat_range > config.LONG_TERM_RANGE) or (
                       area_range > config.LONG_TERM_RANGE * config.LONG_TERM_RANGE)) and (
                       end_date - start_date).days > config.timeLimit:
-                    end_date = start_date + timedelta(days=config.timeLimit)
-                elif (end_date - start_date).days > config.LONG_TERM_LIMIT * 366:
+                    end_date = start_date + timedelta(days=config.timeLimit - 1)
+                elif (end_date - start_date).days > config.LONG_TERM_LIMIT * 365:
                     # Smaller spatial range, limit to one year of data
-                    end_date = start_date + timedelta(days=config.LONG_TERM_LIMIT * 366)
+                    end_date = start_date + timedelta(days=config.LONG_TERM_LIMIT * 365 - 1)
 
             if lon0 > lon1 and np.sign(orig_lon0) == np.sign(orig_lon1):
                 # Swap if lon0 > lon1 but the same sign
