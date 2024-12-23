@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
     config.dz = xr.open_zarr('data/mhw.zarr', chunks='auto',
                              group='anomaly', decode_times=True)
     config.gridSz = 0.25
-    config.timeLimit = 366
+    config.timeLimit = 365
     config.LON_RANGE_LIMIT = 90
     config.LAT_RANGE_LIMIT = 90
     config.LONG_TERM_RANGE = 10 # 10 * 10 degree for lon/lat in region
@@ -93,7 +93,6 @@ async def custom_swagger_ui_html():
 ### Global variables ###
 ### move to config.py ##
 
-
 class MHWResponse(BaseModel):
     lon: float
     lat: float
@@ -124,8 +123,9 @@ async def read_mhw(
 
     #### Usage
     * One-point MHWs without time-span limitation: e.g. /api/mhw?lon0=135&lat0=15
-    * Bounding-box <= 90x90 in degrees: 1-year time-span limitation: e.g. /api/mhw?lon0=135&lon1&=140&lat0=15&lat1=30&start=2021-01-01
-    * Bounding-box > 90x90 in degrees: 1-month time-span limitation: e.g. /api/mhw?lon0=-180&lon1&=180&lat0=-90&lat1=90&start=2021-01-01
+    * Bounding-box <= 10 x 10 in degrees: 10-years time-span limitation: e.g. /api/mhw?lon0=135&lon1=140&lat0=15&lat1=30&start=2013-01-01 (data from 2013/01/01 to 2022/12/01)
+    * Bounding-box > 10 x 10 in degrees: 1-year time-span limitation: e.g. /api/mhw?lon0=135&lon1=150&lat0=15&lat1=30&start=2013-01-01 (data from 2013/01/01 to 2013/12/01)
+    * Bounding-box > 90 x 90 in degrees: 1-month time-span limitation: e.g. /api/mhw?lon0=-180&lon1=180&lat0=-90&lat1=90&start=2013-01-01 (data of 2013/01/01)
     """
 
     try:
@@ -164,9 +164,10 @@ async def read_mhw_csv(
     Query MHW data by longitude/latitude/date (in csv).
 
     #### Usage
-    * One-point MHWs without time-span limitation: e.g. /api/mhw?lon0=135&lat0=15
-    * Bounding-box <= 90x90 in degrees: 1-year time-span limitation: e.g. /api/mhw?lon0=135&lon1&=140&lat0=15&lat1=30&start=2021-01-01
-    * Bounding-box > 90x90 in degrees: 1-month time-span limitation: e.g. /api/mhw?lon0=-180&lon1&=180&lat0=-90&lat1=90&start=2021-01-01
+    * One-point MHWs without time-span limitation: e.g. /api/mhw/csv?lon0=135&lat0=15
+    * Bounding-box <= 10 x 10 in degrees: 10-years time-span limitation: e.g. /api/mhw/csv?lon0=135&lon1=140&lat0=15&lat1=30&start=2013-01-01 (data from 2013/01/01 to 2022/12/01)
+    * Bounding-box > 10 x 10 in degrees: 1-year time-span limitation: e.g. /api/mhw/csv?lon0=135&lon1=150&lat0=15&lat1=30&start=2013-01-01 (data from 2013/01/01 to 2013/12/01)
+    * Bounding-box > 90 x 90 in degrees: 1-month time-span limitation: e.g. /api/mhw/csv?lon0=-180&lon1=180&lat0=-90&lat1=90&start=2013-01-01 (data of 2013/01/01)
     """
 
     try:
