@@ -119,7 +119,7 @@ async def read_mhw(
         None, description="Data fields to append, separated by commas. Allowed fields: 'sst', 'sst_anomaly', 'level', 'td'")
 ):
     """
-    Query MHW data by longitude/latitude/date (in JSON).
+    Query MHW data by longitude/latitude/date (in JSON), providing monthly marine heatwave levels, sea surface temperature (SST), SST anomalies, and thermal displacements at a 0.25° x 0.25° global resolution. See more: https://eco.odb.ntu.edu.tw/pub/MHW
 
     #### Usage
     * One-point MHWs without time-span limitation: e.g. /api/mhw?lon0=135&lat0=15
@@ -161,7 +161,7 @@ async def read_mhw_csv(
         None, description="Data fields to append, separated by commas. Allowed fields: 'sst', 'sst_anomaly', 'level', 'td'")
 ):
     """
-    Query MHW data by longitude/latitude/date (in csv).
+    Query MHW data by longitude/latitude/date (in csv), providing monthly marine heatwave levels, sea surface temperature (SST), SST anomalies, and thermal displacements at a 0.25° x 0.25° global resolution. See more: https://eco.odb.ntu.edu.tw/pub/MHW
 
     #### Usage
     * One-point MHWs without time-span limitation: e.g. /api/mhw/csv?lon0=135&lat0=15

@@ -33,3 +33,5 @@ ODB API of Marine Heatwaves
     -- add extra range/time criteria (10 x 10 x 10yr)  used by Hidy2 to evaluate range average of anomalies
     -- Research example of detrended SST anomalies
     -- fix Basemap land mask wrongly affect data, need latlon=True in contourf
+
+#### ver 0.2.6 Improve Swagger doc (small package upgrade/stable since last revision)
