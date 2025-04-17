@@ -35,3 +35,5 @@ ODB API of Marine Heatwaves
     -- fix Basemap land mask wrongly affect data, need latlon=True in contourf
 
 #### ver 0.2.6 Improve Swagger doc (small package upgrade/stable since last revision)
+
+    -- improve Research example (detrended SST anomalies) code comments/n2
