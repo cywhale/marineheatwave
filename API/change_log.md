@@ -37,4 +37,5 @@ ODB API of Marine Heatwaves
 #### ver 0.2.6 Improve Swagger doc (small package upgrade/stable since last revision)
 
     -- improve Research example (detrended SST anomalies) code comments/n2
-	-- add an ENSO timeseries example (moved from buoy project)
+    -- add an ENSO timeseries example (moved from buoy project)
+    -- try plot example to debug odbchat MHW cli patch
