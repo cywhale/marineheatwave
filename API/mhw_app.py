@@ -20,8 +20,10 @@ import src.config as config
 # dask.config.set(pool=Pool(4))
 # from dask.distributed import Client
 # client = Client('tcp://localhost:8786')
-from src.dask_client_manager import get_dask_client
-client = get_dask_client("mhwapi")
+import logging
+from src.dask_client_manager import get_dask_client, close_dask_client
+
+LOG = logging.getLogger(__name__)
 
 #app = FastAPI(docs_url=None)
 #@app.on_event("startup")
@@ -29,8 +31,16 @@ client = get_dask_client("mhwapi")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # global dz # old use 'sst_anomaly.zarr', add sst -> mhw.zarr
-    config.dz = xr.open_zarr('data/mhw.zarr', chunks='auto',
-                             group='anomaly', decode_times=True)
+    config.dz = xr.open_zarr(
+        'data/mhw.zarr',
+        chunks='auto',
+        group='anomaly',
+        decode_times=True,
+        consolidated=True,
+    )
+    config.dask_client = get_dask_client("mhwapi")
+    if config.dask_client is None:
+        LOG.warning("Dask scheduler unavailable; falling back to local execution.")
     config.gridSz = 0.25
     config.timeLimit = 365
     config.LON_RANGE_LIMIT = 90
@@ -41,7 +51,8 @@ async def lifespan(app: FastAPI):
     yield
     print("Application is shutting down!")
     config.dz.close()
-    client.close()
+    close_dask_client("mhwapi")
+    config.dask_client = None
 
 #@app.on_event("shutdown")
 #async def shutdown_event():

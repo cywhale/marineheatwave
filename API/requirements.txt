@@ -6,8 +6,7 @@ matplotlib==3.10.1
 numcodecs==0.15.1
 numpy==2.2.4
 pandas[pyarrow]==2.2.3
-polars==1.27.1
-polars-lts-cpu==1.27.1
+polars[rtcompat]==1.27.1
 pydantic==2.11.3
 python-dotenv==1.1.0
 Requests==2.32.3
@@ -16,4 +15,3 @@ SQLAlchemy==2.0.40
 uvicorn==0.34.1
 xarray==2025.3.1
 zarr==2.18.6
-

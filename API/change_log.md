@@ -39,3 +39,5 @@ ODB API of Marine Heatwaves
     -- improve Research example (detrended SST anomalies) code comments/n2
     -- add an ENSO timeseries example (moved from buoy project)
     -- try plot example to debug odbchat MHW cli patch
+
+#### ver 0.2.7 Decouple shared Dask service, add resilient client/metadata consolidate/polars rtcompat

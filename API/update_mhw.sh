@@ -1,0 +1,1 @@
+/home/odbadmin/backup/script/update_mhw.sh

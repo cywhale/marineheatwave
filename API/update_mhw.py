@@ -2,6 +2,7 @@ import pandas as pd
 import xarray as xr
 import numpy as np
 import calendar, requests, os  # noqa: E401
+import zarr
 from sqlalchemy import create_engine
 from dotenv import load_dotenv
 from urllib.parse import quote 
@@ -153,6 +154,12 @@ def append_to_zarr():
             # Append only the new data slice to the Zarr store
             expanded_data_slice = new_data_slice.expand_dims('date')
             expanded_data_slice.to_zarr(ZARR_PATH, mode='a', append_dim='date', group='anomaly')
+
+        # Refresh consolidated metadata for faster opens
+        try:
+            zarr.consolidate_metadata(ZARR_PATH)
+        except Exception as e:
+            print("Warning: Failed to consolidate Zarr metadata:", e)
 
         print("All work append to zarr done: ", ZARR_PATH, ' with re-chunking:', RECHUNK)
     

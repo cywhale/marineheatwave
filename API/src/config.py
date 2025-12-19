@@ -1,4 +1,5 @@
 dz = None
+dask_client = None
 gridSz = None
 timeLimit = None
 LON_RANGE_LIMIT = None

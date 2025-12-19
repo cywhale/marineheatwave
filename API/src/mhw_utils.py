@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from typing import Optional
 from datetime import date, datetime, timedelta
 import src.config as config
+from src.dask_client_manager import get_dask_client
 import math
 
 
@@ -46,6 +47,7 @@ def output_df(df, isoTime=False):
 
 
 async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1: Optional[float], start: Optional[date], end: Optional[date], append: Optional[str], mode: Optional[str] = None):
+    config.dask_client = get_dask_client("mhwapi")
     if mode is None:
         mode = 'raw'
 
