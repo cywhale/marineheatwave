@@ -46,4 +46,4 @@ ODB API of Marine Heatwaves
 
     -- connect the MHW API to the shared Dask scheduler with its dedicated mutual-TLS client certificate
     -- map latitudes at or above 90 degrees to the dataset's northernmost grid point (89.875) to avoid empty point selections
-    -- restrict the local-development Dask scheduler and worker in simu.sh to loopback, disable the worker dashboard, and refuse to start if port 8786 is occupied
+    -- restrict the local-development Dask scheduler and worker in simu.sh to loopback, disable the worker dashboard, and fail closed if port 8786 is occupied or cannot be checked

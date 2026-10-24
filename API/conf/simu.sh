@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 # Local development only. Do not run on shared/production hosts.
 
-# Refuse to start a plaintext development scheduler alongside the shared Dask
-# service (or another process already using its scheduler port).
-if ss -H -ltn 'sport = :8786' | grep -q .; then
+# Refuse to start unless the scheduler port can be checked reliably.
+if ! command -v ss >/dev/null 2>&1; then
+    echo 'Refusing to start local Dask: ss is required to check port 8786.' >&2
+    exit 1
+fi
+if ! scheduler_listeners=$(ss -H -ltn 'sport = :8786'); then
+    echo 'Refusing to start local Dask: failed to inspect port 8786.' >&2
+    exit 1
+fi
+if [[ -n "$scheduler_listeners" ]]; then
     echo 'Refusing to start local Dask: port 8786 is already in use.' >&2
     exit 1
 fi
