@@ -1,9 +1,19 @@
+#!/usr/bin/env bash
+# Local development only. Do not run on shared/production hosts.
+
+# Refuse to start a plaintext development scheduler alongside the shared Dask
+# service (or another process already using its scheduler port).
+if ss -H -ltn 'sport = :8786' | grep -q .; then
+    echo 'Refusing to start local Dask: port 8786 is already in use.' >&2
+    exit 1
+fi
+
 # install packages
 pip3 install -r ./requirements.txt
 
-# run dask-scheduler and dask-worker
-dask scheduler --port 8786 &
-dask worker tcp://localhost:8786 --memory-limit 8GB &
+# Run local-development Dask only on loopback. The worker dashboard is disabled.
+dask scheduler --host 127.0.0.1 --port 8786 --dashboard-address 127.0.0.1:0 &
+dask worker tcp://127.0.0.1:8786 --host 127.0.0.1 --memory-limit 8GB --no-dashboard --dashboard-address 127.0.0.1:0 &
 
 # run API server
 ## localhost: gunicorn mhw_app:app -k uvicorn.workers.UvicornWorker -b 127.0.0.1:8030 --timeout 120
