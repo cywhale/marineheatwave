@@ -41,3 +41,9 @@ ODB API of Marine Heatwaves
     -- try plot example to debug odbchat MHW cli patch
 
 #### ver 0.2.7 Decouple shared Dask service, add resilient client/metadata consolidate/polars rtcompat
+
+#### ver 0.2.8 Require TLS for shared Dask client; fix northern latitude boundary
+
+    -- connect the MHW API to the shared Dask scheduler with its dedicated mutual-TLS client certificate
+    -- map latitudes at or above 90 degrees to the dataset's northernmost grid point (89.875) to avoid empty point selections
+    -- restrict the local-development Dask scheduler and worker in simu.sh to loopback, disable the worker dashboard, and fail closed if port 8786 is occupied or cannot be checked
