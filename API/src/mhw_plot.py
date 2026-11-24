@@ -1,8 +1,6 @@
 import seaborn as sns
 import matplotlib.dates as mdates
-import matplotlib.pyplot as plt
 import matplotlib.figure as mfigure
-import numpy as np
 import numpy as np
 import pandas as pd
 from typing import Optional
@@ -105,7 +103,10 @@ async def month_climatology(lon0: float, lat0: float, lon1: Optional[float] = No
         elif len(palette) > len(period):
             palette = palette[0:len(period)]
 
-    fig, ax = plt.subplots(figsize=(12, 8))
+    # A plain Figure (as in region_climatology): no pyplot figure manager, so
+    # nothing keeps the figure alive after the PNG is written (P1-1d).
+    fig = mfigure.Figure(figsize=(12, 8))
+    ax = fig.subplots()
 
     for i, per in enumerate(period):
         per = per.strip()

@@ -1,7 +1,7 @@
 """Local concurrency / memory scenarios (spec 16 r3 §5.1). Never point this at production.
 
     .venv/bin/python -m tools.bench.load --base http://127.0.0.1:18030 --master-pid PID \
-        --scenario light|mixed|heavy2|leak|heavy_types --expected-workers N --out DIR
+        --scenario light|mixed|heavy2|leak|heavy_types|plot_month_large --expected-workers N --out DIR
 
 RSS is sampled every 0.2 s per process.  Every process is recorded with PID,
 PPID, name and cmdline (for manual cross-checking) and given a role:
@@ -338,6 +338,23 @@ def scenario_leak(base, sampler, timeout=DEFAULT_TIMEOUT):
     return {"rss_after_each": rss}
 
 
+def _measure_one(c, sampler, path, settle=1.0):
+    """One request with worker RSS before, peak during and ~settle s after."""
+    time.sleep(settle)
+    before = sampler.snapshot()
+    n0 = len(sampler.samples)
+    r = timed_get(c, path)
+    check_results([r], 1, [])
+    time.sleep(settle)
+    during = sampler.samples[n0:]
+    after = sampler.snapshot()
+    b = rss_by_pid(before, "worker")
+    peak = {pid: max([rss_by_pid(s, "worker").get(pid, 0.0) for s in during] + [rss_by_pid(after, "worker").get(pid, 0.0)])
+            for pid in b}
+    return {"request": r, "before": b, "peak": peak, "after_1s": rss_by_pid(after, "worker"),
+            "peak_minus_before": {pid: peak[pid] - b[pid] for pid in b}, "n_samples_during": len(during)}
+
+
 def scenario_heavy_types(base, sampler, timeout=DEFAULT_TIMEOUT):
     """One request per heavy type, sequential, in ONE worker (-w 1).
 
@@ -347,25 +364,20 @@ def scenario_heavy_types(base, sampler, timeout=DEFAULT_TIMEOUT):
     out = {}
     with httpx.Client(base_url=base, timeout=timeout) as c:
         for order, (name, path) in enumerate(HEAVY.items()):
-            time.sleep(1.0)
-            before = sampler.snapshot()
-            n0 = len(sampler.samples)
-            r = timed_get(c, path)
-            check_results([r], 1, [])
-            time.sleep(1.0)
-            during = sampler.samples[n0:]
-            after = sampler.snapshot()
-            b = rss_by_pid(before, "worker")
-            peak = {pid: max([rss_by_pid(s, "worker").get(pid, 0.0) for s in during] + [rss_by_pid(after, "worker").get(pid, 0.0)])
-                    for pid in b}
-            out[name] = {"order": order, "request": r, "before": b, "peak": peak,
-                         "after_1s": rss_by_pid(after, "worker"),
-                         "peak_minus_before": {pid: peak[pid] - b[pid] for pid in b}}
+            out[name] = {"order": order} | _measure_one(c, sampler, path)
     return out
 
 
+def scenario_plot_month_large(base, sampler, timeout=DEFAULT_TIMEOUT):
+    """The large month plot alone: run against a freshly started -w 1 server so
+    the peak is independent of earlier heavy requests."""
+    with httpx.Client(base_url=base, timeout=timeout) as c:
+        return {"plot_month_large": _measure_one(c, sampler, HEAVY["plot_month_large"])}
+
+
 SCENARIOS = {"light": scenario_light, "mixed": scenario_mixed, "heavy2": scenario_heavy2,
-             "leak": scenario_leak, "heavy_types": scenario_heavy_types}
+             "leak": scenario_leak, "heavy_types": scenario_heavy_types,
+             "plot_month_large": scenario_plot_month_large}
 
 
 def run_scenario(name: str, base: str, master_pid: int, out_dir: Path, timeout: float = DEFAULT_TIMEOUT,

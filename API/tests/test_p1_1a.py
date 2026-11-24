@@ -221,12 +221,13 @@ def test_raw_reads_only_requested_variables(client, url, expected):
     assert read == expected, (read, sorted(keys)[:20])
 
 
-def test_plot_still_reads_full_dataset_in_p1_1a(client):
-    """Scope marker: area/month plots keep reading every variable until P1-1d."""
+def test_plot_reads_only_plotted_variable(client):
+    """Was a P1-1a scope marker (plots read all 4 variables); since P1-1d a plot
+    reads only its sstvar.  More plot cases are in tests/test_p1_1d.py."""
     with chunk_reads() as keys:
         r = client.get("/api/mhw/plot?bbox=(135,15,137,17)&period=2019-202006&sstvar=sst&mode=series")
     assert r.status_code == 200
-    assert _vars_read(keys) - COORDS == DATA_VARS
+    assert _vars_read(keys) - COORDS == {"sst"}
 
 
 # ------------------------------------------------- equivalence with 0.2.8 path

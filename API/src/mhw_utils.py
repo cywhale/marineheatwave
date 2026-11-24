@@ -86,9 +86,9 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
     if end_date < start_date:
         start_date, end_date = end_date, start_date
 
-    # raw queries read only the requested variables (P1-1a); the plot modes
-    # still read the full Dataset until P1-1d.
-    ds = config.dz[variables] if mode == 'raw' else config.dz
+    # Read only the requested variables: raw (P1-1a) and the plot modes
+    # area_mean_* / month_mean, where variables == [append] (P1-1d).
+    ds = config.dz[variables]
 
     try:
         orig_lon0, orig_lon1 = lon0, lon1
@@ -185,16 +185,17 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
 
         if mode in ['area_mean_sst', 'area_mean_sst_anomaly']:
             # Perform the averaging using xarray
-            area_mean = data_subset.mean(dim=['lon', 'lat'], skipna=True).dropna(
-                dim='date', how='all')
+            # No dropna(dim='date'): on the former 4-variable Dataset it never
+            # removed a date (level is never NaN), so every date is kept here
+            # too; all-NaN months stay as gaps in the plotted line (P1-1d).
+            area_mean = data_subset.mean(dim=['lon', 'lat'], skipna=True)
             df = area_mean[['date', append]].to_dataframe().reset_index()
             # df.dropna(subset=[append], inplace=True)
             pl_df = output_df(df, False)
 
         elif mode == 'month_mean':
             # Segment the data by month first
-            monthly_means = data_subset.groupby('date.month').mean(dim=['lon', 'lat'], skipna=True).dropna(
-                dim='date', how='all')
+            monthly_means = data_subset.groupby('date.month').mean(dim=['lon', 'lat'], skipna=True)
             df = monthly_means[['date', append]].to_dataframe().reset_index()
             pl_df = output_df(df, False)
 
