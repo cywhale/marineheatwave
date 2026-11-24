@@ -76,7 +76,7 @@ def test_launcher_unsets_dask_env_and_no_longer_exports_it():
 # ----------------------------------------------------- unpatched app process
 
 _UNPATCHED = r"""
-import json, os, sys
+import json, os, resource, sys
 os.chdir(sys.argv[1])
 sys.path.insert(0, sys.argv[1])
 calls = {"client_init": 0, "shim_get": 0, "shim_close": 0}
@@ -103,13 +103,29 @@ from dask.base import is_dask_collection
 
 urls = json.loads(sys.argv[2])
 statuses = {}
+import zarr.storage
+inspect_reads = []
+_orig_getitem = zarr.storage.DirectoryStore.__getitem__
+def _spy(self, key):
+    inspect_reads.append(key)
+    return _orig_getitem(self, key)
+
 with TestClient(mhw_app.app) as c:
-    lazy = {k: type(config.dz[k].variable._data).__name__ for k in config.dz.data_vars}
-    dask_backed = [k for k in config.dz.data_vars if is_dask_collection(config.dz[k].data)
-                   or config.dz[k].chunks is not None]
+    # Type checks only: never touch .data / .values, which would materialise a
+    # whole global variable (sst 2.2 GB, f8 vars 4.5 GB) on this lazy path.
+    zarr.storage.DirectoryStore.__getitem__ = _spy
+    try:
+        lazy = {k: type(config.dz[k].variable._data).__name__ for k in config.dz.data_vars}
+        dask_backed = [k for k in config.dz.data_vars if is_dask_collection(config.dz[k].variable._data)
+                       or config.dz[k].chunks is not None]
+    finally:
+        zarr.storage.DirectoryStore.__getitem__ = _orig_getitem
     for u in urls:
         statuses[u] = c.get(u).status_code
 print(json.dumps({"calls": calls, "statuses": statuses, "dask_backed": dask_backed, "lazy": lazy,
+                  "inspect_reads": inspect_reads,
+                  "maxrss_mb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                  / (1024 * 1024 if sys.platform == "darwin" else 1024),
                   "default_client": distributed.client._get_global_client() is not None}))
 """
 
@@ -135,6 +151,9 @@ def test_unpatched_app_never_creates_dask_client(tmp_path):
     assert res["calls"] == {"client_init": 0, "shim_get": 0, "shim_close": 0}
     assert res["default_client"] is False
     assert res["dask_backed"] == []
+    assert res["inspect_reads"] == []  # the type checks read nothing from disk
+    # whole-variable materialisation would be >= 2.2 GB (sst); the four small requests need far less
+    assert res["maxrss_mb"] < 1500, res["maxrss_mb"]
     assert set(res["lazy"].values()) == {"CopyOnWriteArray"}
     assert all(s == 200 for s in res["statuses"].values()), res["statuses"]
     assert "Dask scheduler unavailable" not in out.stderr
@@ -143,13 +162,15 @@ def test_unpatched_app_never_creates_dask_client(tmp_path):
 def test_opened_dataset_has_no_dask_or_memory_cache(client):
     import src.config as config
 
-    for k in config.dz.data_vars:
-        x, chain = config.dz[k].variable._data, []
-        while x is not None:
-            chain.append(type(x).__name__)
-            x = getattr(x, "array", None)
-        assert chain == ["CopyOnWriteArray", "LazilyIndexedArray", "ZarrArrayWrapper"], (k, chain)
-        assert config.dz[k].chunks is None
+    with chunk_reads() as keys:  # inspection must not materialise any variable
+        for k in config.dz.data_vars:
+            x, chain = config.dz[k].variable._data, []
+            while x is not None:
+                chain.append(type(x).__name__)
+                x = getattr(x, "array", None)
+            assert chain == ["CopyOnWriteArray", "LazilyIndexedArray", "ZarrArrayWrapper"], (k, chain)
+            assert config.dz[k].chunks is None
+    assert keys == []
 
 
 # ------------------------------------------------------------ disk-level reads
