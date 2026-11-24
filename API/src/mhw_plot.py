@@ -8,7 +8,7 @@ from datetime import datetime
 import polars as pl
 from fastapi import HTTPException
 from src.mhw_utils import process_mhw_data
-from src.guard import NO_GUARD, plot_lock
+from src.guard import plot_lock
 from io import BytesIO
 # from tempfile import NamedTemporaryFile
 
@@ -72,7 +72,7 @@ def genImageFile(fig):
     return buf
 
 
-def month_climatology(lon0: float, lat0: float, lon1: Optional[float] = None, lat1: Optional[float] = None, period: Optional[str] = "all", sstvar: Optional[str] = None, palette: Optional[str] = None, guard=NO_GUARD):
+def month_climatology(lon0: float, lat0: float, lon1: Optional[float] = None, lat1: Optional[float] = None, period: Optional[str] = "all", sstvar: Optional[str] = None, palette: Optional[str] = None):
     # Get data
     enddate = (datetime.today() - pd.DateOffset(months=1)
                ).replace(day=1).date()
@@ -80,7 +80,7 @@ def month_climatology(lon0: float, lat0: float, lon1: Optional[float] = None, la
         sstvar = 'sst'
 
     _, data = process_mhw_data(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1,
-                               start="1982-01-01", end=str(enddate), append=sstvar, mode="month_mean", guard=guard)
+                               start="1982-01-01", end=str(enddate), append=sstvar, mode="month_mean")
 
     # data = data.with_columns(pl.col('date').str.strptime(pl.Date, "%Y-%m-%dT%H:%M:%S", strict=False))
     data = data.with_columns([
@@ -155,7 +155,7 @@ def month_climatology(lon0: float, lat0: float, lon1: Optional[float] = None, la
         return genImageFile(fig)
 
 
-def region_climatology(bbox: str, start: str, end: str, sstvar: Optional[str] = None, palette: Optional[str] = None, guard=NO_GUARD):
+def region_climatology(bbox: str, start: str, end: str, sstvar: Optional[str] = None, palette: Optional[str] = None):
     bbox_list = bbox.strip('()').split('),(')
     if not sstvar or sstvar.strip() not in ['sst', 'sst_anomaly']:
         sstvar = 'sst'
@@ -186,7 +186,7 @@ def region_climatology(bbox: str, start: str, end: str, sstvar: Optional[str] = 
 
         # print(lon0, lon1, lat0, lat1, start, end)
         _, df = process_mhw_data(lon0=lon0, lon1=lon1, lat0=lat0, lat1=lat1,
-                                 start=start, end=end, append=sstvar, mode='area_mean_'+sstvar, guard=guard)
+                                 start=start, end=end, append=sstvar, mode='area_mean_'+sstvar)
         df = df.sort('date')  # Ensure data is in chronological order
         series.append((i, bbox_str, df))
 

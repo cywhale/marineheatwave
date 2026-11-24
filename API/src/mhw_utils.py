@@ -6,7 +6,6 @@ from fastapi import HTTPException
 from typing import Optional
 from datetime import date, datetime, timedelta
 import src.config as config
-from src.guard import NO_GUARD
 import math
 
 
@@ -48,9 +47,33 @@ def output_df(df, isoTime=False):
     return pl_df
 
 
-def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1: Optional[float], start: Optional[date], end: Optional[date], append: Optional[str], mode: Optional[str] = None, guard=NO_GUARD):
-    # Synchronous (P1-1c): endpoints run in FastAPI's threadpool.  guard.claim()
-    # is called with the lazy selection size before anything is materialised.
+class MhwSelection:
+    """A lazy selection (nothing read from the store yet) and its size.
+
+    P1-1c: the endpoint inspects ``nbytes`` to decide whether the request is
+    heavy *before* any data is read, then runs ``finish_mhw_data`` in the
+    matching thread lane.  For a 0-meridian crossing ``parts`` holds both
+    subsets; ``xr.concat`` (which reads them at once) happens in finish.
+    """
+
+    __slots__ = ("out_file", "parts", "variables", "mode", "append")
+
+    def __init__(self, out_file, parts, variables, mode, append):
+        self.out_file, self.parts = out_file, tuple(parts)
+        self.variables, self.mode, self.append = variables, mode, append
+
+    @property
+    def nbytes(self) -> int:
+        return sum(p.nbytes for p in self.parts)
+
+
+def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1: Optional[float], start: Optional[date], end: Optional[date], append: Optional[str], mode: Optional[str] = None):
+    """Select and materialise in one call (plot paths and tests)."""
+    return finish_mhw_data(select_mhw_data(lon0, lat0, lon1, lat1, start, end, append, mode))
+
+
+def select_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1: Optional[float], start: Optional[date], end: Optional[date], append: Optional[str], mode: Optional[str] = None) -> MhwSelection:
+    """Validate the request and build the lazy selection; reads no data chunks."""
     if mode is None:
         mode = 'raw'
 
@@ -102,9 +125,8 @@ def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1: Opti
 
             out_file = (out_file + '_' + deg2str(lon0, True, orig_lon0 <= -179.875) + '_' + deg2str(lat0, False) +
                         '_' + 'Point' + '_' + str(start_date.date()) + '_' + str(end_date.date()))
-            data_subset = ds.sel(lon=slice(lon0, lon0+0.5*config.gridSz), lat=slice(
-                lat0, lat0+0.5*config.gridSz), date=slice(start_date, end_date))
-            guard.claim(data_subset.nbytes)
+            parts = (ds.sel(lon=slice(lon0, lon0+0.5*config.gridSz), lat=slice(
+                lat0, lat0+0.5*config.gridSz), date=slice(start_date, end_date)),)
 
         else:
             # Bounding box, 1 month or 1 year date range limitation
@@ -171,19 +193,31 @@ def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1: Opti
                     lat0, lat1+offset_lat*config.gridSz), date=slice(start_date, end_date))
                 subset2 = ds.sel(lon=slice(0, lon1+offset_lon*config.gridSz), lat=slice(
                     lat0, lat1+offset_lat*config.gridSz), date=slice(start_date, end_date))
-                # concat reads both subsets into memory at once (chunks=None):
-                # claim their combined size first
-                guard.claim(subset1.nbytes + subset2.nbytes)
-                data_subset = xr.concat([subset1, subset2], dim='lon')
+                # concatenated in finish_mhw_data (concat reads both at once)
+                parts = (subset1, subset2)
             else:
                 # Requested area doesn't cross the zero meridian
-                data_subset = ds.sel(lon=slice(lon0, lon1+offset_lon*config.gridSz), lat=slice(
-                    lat0, lat1+offset_lat*config.gridSz), date=slice(start_date, end_date))
-                guard.claim(data_subset.nbytes)
+                parts = (ds.sel(lon=slice(lon0, lon1+offset_lon*config.gridSz), lat=slice(
+                    lat0, lat1+offset_lat*config.gridSz), date=slice(start_date, end_date)),)
 
             out_file = (out_file + '_' + deg2str(lon0, True, orig_lon0 <= -179.875) + '_' + deg2str(lat0, False) +
                         '_' + deg2str(lon1, True, orig_lon1 <= -179.875) + '_' + deg2str(lat1, False) +
                         '_' + 'BBOX' + '_' + str(start_date.date()) + '_' + str(end_date.date()))
+
+        return MhwSelection(out_file, parts, variables, mode, append)
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def finish_mhw_data(sel: MhwSelection):
+    """Read, reduce and convert a selection (the memory-heavy part)."""
+    out_file, variables, mode, append = sel.out_file, sel.variables, sel.mode, sel.append
+    try:
+        if len(sel.parts) == 2:
+            data_subset = xr.concat(list(sel.parts), dim='lon')
+        else:
+            data_subset = sel.parts[0]
 
         if data_subset.nbytes == 0:
             raise HTTPException(

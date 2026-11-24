@@ -1,11 +1,14 @@
-"""P1-1c targeted checks (spec 17 P1-1c): threadpool endpoints + heavy-request guard.
+"""P1-1c targeted checks (spec 17 P1-1c; r2 after Codex round 9): heavy-request lane.
 
-Mutual exclusion is proven with explicit synchronisation points (guard hooks
-and events), never inferred from timing.  Every wait has a timeout and every
-blocked thread is released in ``finally``, so a broken guard fails the test
-instead of hanging it.  Responses are compared with the serial golden manifest.
+Heavy work waits for a heavy-lane token in the event loop and then runs in a
+thread of that lane; light work uses the default threadpool.  Mutual exclusion
+and non-starvation are proven with explicit synchronisation points (guard
+hooks and events), never inferred from timing.  Every wait has a timeout and
+every blocked thread is released and joined in ``finally``.  Responses are
+compared with the serial golden manifest.
 """
 import ast
+import asyncio
 import hashlib
 import inspect
 import json
@@ -35,6 +38,13 @@ def assert_golden(cid, r):
         assert r.headers.get(k) == v, (cid, k)
 
 
+def wait_until(cond, timeout=WAIT, what="condition"):
+    deadline = time.monotonic() + timeout
+    while not cond():
+        assert time.monotonic() < deadline, f"timed out waiting for {what}"
+        time.sleep(0.01)
+
+
 @pytest.fixture()
 def guard_cfg():
     """Set slots / threshold for one test; restore defaults and clear the hook after."""
@@ -53,13 +63,13 @@ class Runner:
     def __init__(self, client):
         self.client, self.threads, self.results = client, [], {}
 
-    def start(self, key, path, headers=None):
+    def start(self, key, path):
         def run():
             try:
-                self.results[key] = self.client.get(path, headers=headers)
+                self.results[key] = self.client.get(path)
             except BaseException as e:  # surfaced by join()
                 self.results[key] = e
-        t = threading.Thread(target=run, name=f"req-{key}", daemon=True)
+        t = threading.Thread(target=run, daemon=True)
         t.key = key
         self.threads.append(t)
         t.start()
@@ -77,100 +87,120 @@ class Runner:
         return self.results
 
 
+def borrowed(client, limiter_fn):
+    """Tokens currently borrowed from a limiter, read inside the app's event loop."""
+    return client.portal.call(lambda: limiter_fn().borrowed_tokens)
+
+
 # ------------------------------------------------------------------ structure
 
 
-def test_data_and_plot_paths_are_synchronous():
+def test_data_and_plot_work_is_synchronous_and_endpoints_only_dispatch():
     from src import mhw_plot, mhw_utils
-    import mhw_app
 
-    for fn in (mhw_utils.process_mhw_data, mhw_plot.month_climatology, mhw_plot.region_climatology,
-               mhw_app.read_mhw, mhw_app.read_mhw_csv, mhw_app.climatology):
+    for fn in (mhw_utils.process_mhw_data, mhw_utils.select_mhw_data, mhw_utils.finish_mhw_data,
+               mhw_plot.month_climatology, mhw_plot.region_climatology):
         assert not inspect.iscoroutinefunction(fn), fn.__name__
-    for rel in ("mhw_app.py", "src/mhw_utils.py", "src/mhw_plot.py"):
-        tree = ast.parse((API / rel).read_text())
-        assert not [n for n in ast.walk(tree) if isinstance(n, ast.Await)
-                    and rel != "mhw_app.py"], rel
-        calls = {f"{n.func.value.id}.{n.func.attr}" for n in ast.walk(tree)
-                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                 and isinstance(n.func.value, ast.Name)}
-        assert "asyncio.run" not in calls, rel
+    tree = ast.parse((API / "mhw_app.py").read_text())
+    heavy_calls = {"finish_mhw_data", "process_mhw_data", "month_climatology", "region_climatology",
+                   "select_mhw_data"}
+    eps = [n for n in tree.body if isinstance(n, ast.AsyncFunctionDef)
+           and n.name in ("read_mhw", "read_mhw_csv", "climatology")]
+    assert len(eps) == 3
+    for ep in eps:
+        # awaits only hand work to a thread
+        awaited = {n.value.func.id for n in ast.walk(ep) if isinstance(n, ast.Await)}
+        assert awaited <= {"run_in_threadpool", "run_guarded"}, (ep.name, awaited)
+        # data / plot functions are called only inside the nested work() (a thread),
+        # or passed to run_in_threadpool, never directly in the event loop
+        nested = {id(x) for f in ast.walk(ep) if isinstance(f, ast.FunctionDef) for x in ast.walk(f)}
+        direct = [n.func.id for n in ast.walk(ep) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                  and n.func.id in heavy_calls and id(n) not in nested]
+        assert direct == [], (ep.name, direct)
+    for rel in ("src/mhw_utils.py", "src/mhw_plot.py"):
+        t = ast.parse((API / rel).read_text())
+        assert not [n for n in ast.walk(t) if isinstance(n, (ast.Await, ast.AsyncFunctionDef))], rel
 
 
-def test_guard_acquires_once_and_releases_on_error(guard_cfg):
-    guard_cfg(slots=1, heavy_bytes=10)
-    with G.RequestGuard() as g:
-        g.claim(5)
-        assert not g.held
-        g.claim(11)
-        g.claim(1000)
-        assert g.held and G.stats["acquired"] == 1
-    assert G.stats == {"active": 0, "max_active": 1, "acquired": 1, "released": 1}
-    with pytest.raises(ZeroDivisionError):
-        with G.RequestGuard(heavy=True):
-            1 / 0
-    assert G.stats["active"] == 0 and G.stats["released"] == 2
-    # the single slot is free again: a non-blocking acquire succeeds
-    assert G._slots.acquire(blocking=False)
-    G._slots.release()
+def test_select_reads_no_data_and_matches_process(client):
+    """select builds a lazy selection only; finish(select(..)) == process(..)."""
+    from datetime import date
+
+    from polars.testing import assert_frame_equal
+
+    from src.mhw_utils import finish_mhw_data, process_mhw_data, select_mhw_data
+    from tests.test_p1_1a import COORDS, chunk_reads
+
+    kw = dict(lon0=-5, lat0=-5, lon1=5, lat1=5, start=date(2020, 1, 1), end=date(2021, 12, 1), append="sst")
+    with chunk_reads() as keys:
+        sel = select_mhw_data(**kw)
+    assert [k for k in keys if k.split("/")[1] not in COORDS] == []
+    assert len(sel.parts) == 2 and sel.nbytes == sum(p.nbytes for p in sel.parts) > 0
+    a, b = finish_mhw_data(sel), process_mhw_data(**kw)
+    assert a[0] == b[0]
+    assert_frame_equal(a[1], b[1], check_exact=True)
 
 
-def test_slot_while_holding_plot_lock_is_refused(guard_cfg):
+def test_run_guarded_releases_on_error_and_counts_once(guard_cfg):
     guard_cfg(slots=1)
-    with G.plot_lock():
-        with pytest.raises(RuntimeError, match="lock order"):
-            with G.RequestGuard(heavy=True):
-                pass
-    assert G.stats["active"] == 0 and not G.PLOT_LOCK.locked()
+
+    async def scenario():
+        with pytest.raises(ZeroDivisionError):
+            await G.run_guarded(lambda: 1 / 0, heavy=True)
+        assert G._heavy_limiter().borrowed_tokens == 0
+        assert await G.run_guarded(lambda: 42, heavy=True) == 42
+        assert await G.run_guarded(lambda: 7, heavy=False) == 7
+
+    asyncio.run(scenario())
+    assert G.stats == {"waiting": 0, "active": 0, "max_active": 1, "acquired": 2, "released": 2}
 
 
-# ------------------------------------------------------ claim before reading
+# ------------------------------------------------------ slot before reading
 
 
 @pytest.mark.parametrize("cid", ["J07", "J09", "C03", "J08"])
-def test_claim_happens_before_any_data_read(client, guard_cfg, cid):
-    """J07/C03/J08 go through xr.concat (materialises at once); J09 is a single bbox."""
+def test_slot_taken_before_any_data_read(client, guard_cfg, cid):
+    """J07/C03/J08 go through xr.concat (reads both parts at once); J09 is one bbox."""
     from tests.test_p1_1a import COORDS, chunk_reads
 
     guard_cfg(slots=1, heavy_bytes=1)
     at_acquire = []
     with chunk_reads() as keys:
-        G.hook = lambda ev, g: at_acquire.append([k for k in keys if k.split("/")[1] not in COORDS]) \
+        G.hook = lambda ev, t: at_acquire.append([k for k in keys if k.split("/")[1] not in COORDS]) \
             if ev == "acquired" else None
         r = client.get(url(cid))
     assert_golden(cid, r)
     assert len(at_acquire) == 1, "exactly one acquire per request"
-    assert at_acquire[0] == [], f"data read before the claim: {at_acquire[0][:5]}"
+    assert at_acquire[0] == [], f"data read before the slot: {at_acquire[0][:5]}"
     assert any(k.split("/")[1] not in COORDS for k in keys)  # data was read afterwards
 
 
 def test_no_data_read_while_plot_lock_held(client, guard_cfg):
-    from tests.test_p1_1a import chunk_reads
+    import zarr.storage
 
     guard_cfg()
-    under_lock = []
-    with chunk_reads() as keys:
-        import zarr.storage
-        spy = zarr.storage.DirectoryStore.__getitem__
+    under_lock, reads = [], []
+    real = zarr.storage.DirectoryStore.__getitem__
 
-        def check(self, key):
-            if getattr(G._local, "plot_lock_depth", 0):
-                under_lock.append(key)
-            return spy(self, key)
+    def spy(self, key):
+        reads.append(key)
+        if getattr(G._local, "plot_lock_depth", 0):
+            under_lock.append(key)
+        return real(self, key)
 
-        zarr.storage.DirectoryStore.__getitem__ = check
-        try:
-            for cid in ("P03", "P01"):
-                assert_golden(cid, client.get(url(cid)))
-        finally:
-            zarr.storage.DirectoryStore.__getitem__ = spy
-    assert keys and under_lock == []
+    zarr.storage.DirectoryStore.__getitem__ = spy
+    try:
+        for cid in ("P03", "P01"):
+            assert_golden(cid, client.get(url(cid)))
+    finally:
+        zarr.storage.DirectoryStore.__getitem__ = real
+    assert reads and under_lock == []
 
 
-def test_plot_takes_slot_on_entry_and_lock_after_data(client, guard_cfg):
+def test_plot_takes_slot_first_and_lock_after_data(client, guard_cfg):
     guard_cfg()
     events = []
-    G.hook = lambda ev, g: events.append(ev)
+    G.hook = lambda ev, t: events.append(ev)
     assert_golden("P03", client.get(url("P03")))  # two bboxes
     assert events == ["acquiring", "acquired", "plot_locked", "releasing"]
 
@@ -179,25 +209,22 @@ def test_plot_takes_slot_on_entry_and_lock_after_data(client, guard_cfg):
 
 
 def _two_heavy(client, slots, first_cid="J07", second_cid="P03"):
-    """Start first; while it holds its slot, start second and wait until it asks for one."""
+    """Start first; while it holds a token, start second and wait until it asks for one."""
     first_in, second_asking, release_first = threading.Event(), threading.Event(), threading.Event()
-    order, lock = [], threading.Lock()
-    first_thread = []
+    order, lock, first = [], threading.Lock(), []
 
-    def hook(ev, g):
-        me = threading.current_thread()
+    def hook(ev, ticket):
         with lock:
-            order.append((me.ident, ev))  # AnyIO worker threads share one name
-        if ev == "acquired" and not first_thread:
-            first_thread.append(me)
+            order.append((id(ticket), ev))
+        if ev == "acquired" and not first:
+            first.append(ticket)
             first_in.set()
             assert release_first.wait(WAIT), "first request was never released"
-        elif ev == "acquiring" and first_thread and me is not first_thread[0]:
+        elif ev == "acquiring" and first and ticket is not first[0]:
             second_asking.set()
 
     G.hook = hook
-    run = Runner(client)
-    err = None
+    run, err = Runner(client), None
     try:
         run.start(first_cid, url(first_cid))
         assert first_in.wait(WAIT), "first request never acquired"
@@ -205,12 +232,9 @@ def _two_heavy(client, slots, first_cid="J07", second_cid="P03"):
         assert second_asking.wait(WAIT), "second request never asked for a slot"
         if slots == 1:
             time.sleep(0.3)  # give a broken guard the chance to let it in
-            assert G.stats["active"] == 1, "second request entered while the only slot was held"
+            assert G.stats["active"] == 1 and G.stats["waiting"] == 1, G.stats
         else:
-            deadline = time.monotonic() + WAIT
-            while G.stats["active"] < 2 and time.monotonic() < deadline:
-                time.sleep(0.01)
-            assert G.stats["active"] == 2, "second request could not run alongside the first"
+            wait_until(lambda: G.stats["active"] == 2, what="two active heavy requests")
     except BaseException as e:
         err = e
     finally:
@@ -218,40 +242,37 @@ def _two_heavy(client, slots, first_cid="J07", second_cid="P03"):
     res = run.join()  # always join, so no request leaks into the next test
     if err is not None:
         raise err
-    return res, order
+    return res, order, first[0]
 
 
 def test_slots_1_two_heavy_requests_never_overlap(client, guard_cfg):
     guard_cfg(slots=1, heavy_bytes=1)
-    res, order = _two_heavy(client, slots=1)
-    assert G.stats["max_active"] == 1 and G.stats["active"] == 0
-    # the second acquired only after the first started releasing (i.e. after
-    # its serialisation / savefig finished)
-    names = [n for n, ev in order if ev == "acquired"]
-    first, second = names[0], names[1]
-    assert order.index((first, "releasing")) < order.index((second, "acquired"))
+    res, order, first = _two_heavy(client, slots=1)
+    assert G.stats["max_active"] == 1 and G.stats["active"] == 0 and G.stats["waiting"] == 0
+    second = next(t for t, ev in order if ev == "acquired" and t != id(first))
+    # the second started only after the first finished (serialisation / savefig done)
+    assert order.index((id(first), "releasing")) < order.index((second, "acquired"))
     assert_golden("J07", res["J07"])
     assert_golden("P03", res["P03"])
 
 
 def test_slots_2_two_heavy_requests_run_together(client, guard_cfg):
     guard_cfg(slots=2, heavy_bytes=1)
-    res, _ = _two_heavy(client, slots=2)
+    res, _, _ = _two_heavy(client, slots=2)
     assert G.stats["max_active"] == 2
     assert_golden("J07", res["J07"])
     assert_golden("P03", res["P03"])
 
 
-def test_error_after_claim_releases_slot(client, guard_cfg):
+def test_error_after_slot_releases_it(client, guard_cfg):
     guard_cfg(slots=1, heavy_bytes=1)
-    r = client.get(url("E02b"))  # land bbox + sst: 400 after the claim
+    r = client.get(url("E02b"))  # land bbox + sst: 400 raised while holding the slot
     assert_golden("E02b", r)
     assert G.stats["acquired"] == 1 and G.stats["active"] == 0
-    assert G._slots.acquire(blocking=False), "slot still held after the 400"
-    G._slots.release()
+    assert borrowed(client, G._heavy_limiter) == 0, "slot still held after the 400"
     run = Runner(client)
     run.start("J07", url("J07"))
-    assert_golden("J07", run.join(timeout=WAIT)["J07"])
+    assert_golden("J07", run.join()["J07"])
     assert G.stats["acquired"] == 2
 
 
@@ -259,21 +280,19 @@ def test_light_request_not_blocked_by_held_slot(client, guard_cfg):
     guard_cfg()  # default threshold and slots
     held, release = threading.Event(), threading.Event()
 
-    def hook(ev, g):
+    def hook(ev, t):
         if ev == "acquired":
             held.set()
             assert release.wait(WAIT)
 
     G.hook = hook
-    run, light = Runner(client), Runner(client)
-    err = None
+    run, light, err = Runner(client), Runner(client), None
     try:
         run.start("P01", url("P01"))
         assert held.wait(WAIT)
         light.start("J01", url("J01"))  # same app, while the only slot is held
-        r = light.join(timeout=WAIT)["J01"]  # bounded: a blocked J01 fails here
-        assert_golden("J01", r)
-        assert G.stats["acquired"] == 1 and G.stats["active"] == 1  # J01 did not take a slot
+        assert_golden("J01", light.join()["J01"])  # bounded: a blocked J01 fails here
+        assert G.stats["acquired"] == 1 and G.stats["active"] == 1  # J01 took no slot
     except BaseException as e:
         err = e
     finally:
@@ -283,6 +302,56 @@ def test_light_request_not_blocked_by_held_slot(client, guard_cfg):
     if err is not None:
         raise err
     assert_golden("P01", res["P01"])
+
+
+# ------------------------------------ Codex round 9: no threadpool starvation
+
+
+def test_queued_heavy_requests_do_not_starve_the_threadpool(client, guard_cfg):
+    """Shrink the default threadpool to 3 threads, hold the only heavy slot and
+    queue 8 more heavy requests: they wait in the event loop without taking a
+    default thread, so a light request still runs (r1 would block here)."""
+    import anyio.to_thread
+
+    guard_cfg(slots=1)
+    default = anyio.to_thread.current_default_thread_limiter
+    old_total = client.portal.call(lambda: default().total_tokens)
+    client.portal.call(lambda: setattr(default(), "total_tokens", 3))
+    held, release = threading.Event(), threading.Event()
+
+    def hook(ev, t):
+        if ev == "acquired" and not held.is_set():
+            held.set()
+            assert release.wait(WAIT)
+
+    G.hook = hook
+    heavy, light, err, res = Runner(client), Runner(client), None, {}
+    queued = ["P01", "P06", "P02", "P04"] * 2
+    try:
+        heavy.start("hold-P01", url("P01"))
+        assert held.wait(WAIT)
+        for i, cid in enumerate(queued):
+            heavy.start(f"q{i}-{cid}", url(cid))
+        wait_until(lambda: G.stats["waiting"] == len(queued), what="8 queued heavy requests")
+        # the queued ones hold no default thread (the slot holder runs in the heavy lane)
+        assert borrowed(client, default) == 0
+        light.start("J01", url("J01"))
+        assert_golden("J01", light.join()["J01"])
+        assert G.stats["active"] == 1 and G.stats["waiting"] == len(queued)
+    except BaseException as e:
+        err = e
+    finally:
+        release.set()
+        try:
+            res = heavy.join(timeout=WAIT * 2)
+            light.join()
+        finally:
+            client.portal.call(lambda: setattr(default(), "total_tokens", old_total))
+    if err is not None:
+        raise err
+    for key, r in res.items():
+        assert_golden(key.split("-")[-1], r)
+    assert G.stats["max_active"] == 1 and G.stats["acquired"] == 1 + len(queued)
 
 
 # ------------------------------------------------- concurrent golden
