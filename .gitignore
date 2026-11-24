@@ -42,3 +42,8 @@ node_modules
 **/*.zarr
 **/daily
 **/monthly_*
+# P1-0 golden tests: local data link stays out; re-include API/tests (overrides **/test* above)
+API/data/
+!API/tests/
+!API/tests/**
+API/tests/**/__pycache__/
