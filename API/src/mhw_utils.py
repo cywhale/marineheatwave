@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from typing import Optional
 from datetime import date, datetime, timedelta
 import src.config as config
+from src.guard import NO_GUARD
 import math
 
 
@@ -47,7 +48,9 @@ def output_df(df, isoTime=False):
     return pl_df
 
 
-async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1: Optional[float], start: Optional[date], end: Optional[date], append: Optional[str], mode: Optional[str] = None):
+def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1: Optional[float], start: Optional[date], end: Optional[date], append: Optional[str], mode: Optional[str] = None, guard=NO_GUARD):
+    # Synchronous (P1-1c): endpoints run in FastAPI's threadpool.  guard.claim()
+    # is called with the lazy selection size before anything is materialised.
     if mode is None:
         mode = 'raw'
 
@@ -101,6 +104,7 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
                         '_' + 'Point' + '_' + str(start_date.date()) + '_' + str(end_date.date()))
             data_subset = ds.sel(lon=slice(lon0, lon0+0.5*config.gridSz), lat=slice(
                 lat0, lat0+0.5*config.gridSz), date=slice(start_date, end_date))
+            guard.claim(data_subset.nbytes)
 
         else:
             # Bounding box, 1 month or 1 year date range limitation
@@ -167,11 +171,15 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
                     lat0, lat1+offset_lat*config.gridSz), date=slice(start_date, end_date))
                 subset2 = ds.sel(lon=slice(0, lon1+offset_lon*config.gridSz), lat=slice(
                     lat0, lat1+offset_lat*config.gridSz), date=slice(start_date, end_date))
+                # concat reads both subsets into memory at once (chunks=None):
+                # claim their combined size first
+                guard.claim(subset1.nbytes + subset2.nbytes)
                 data_subset = xr.concat([subset1, subset2], dim='lon')
             else:
                 # Requested area doesn't cross the zero meridian
                 data_subset = ds.sel(lon=slice(lon0, lon1+offset_lon*config.gridSz), lat=slice(
                     lat0, lat1+offset_lat*config.gridSz), date=slice(start_date, end_date))
+                guard.claim(data_subset.nbytes)
 
             out_file = (out_file + '_' + deg2str(lon0, True, orig_lon0 <= -179.875) + '_' + deg2str(lat0, False) +
                         '_' + deg2str(lon1, True, orig_lon1 <= -179.875) + '_' + deg2str(lat1, False) +

@@ -12,7 +12,6 @@ what golden cannot see:
   cross-longitude concat order) as the 0.2.8 ``open_zarr(chunks='auto')`` path.
 """
 import ast
-import asyncio
 import os
 import subprocess
 import sys
@@ -274,7 +273,7 @@ def test_same_frames_as_0_2_8_open_path(client, old_dz, args):
 
     def run():
         try:
-            return asyncio.run(process_mhw_data(**kw))
+            return process_mhw_data(**kw)  # synchronous since P1-1c
         except HTTPException as e:
             return ("HTTPException", e.status_code, e.detail)
 

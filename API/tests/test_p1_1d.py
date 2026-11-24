@@ -74,8 +74,10 @@ def _missing(s: pl.Series) -> list[bool]:
 def _series(fn, args):
     lon0, lat0, lon1, lat1, start, end, var, mode = args
     m = mode if mode == "month_mean" else f"area_mean_{var}"
-    _, df = asyncio.run(fn(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1, start=D(start), end=D(end),
-                           append=var, mode=m))
+    res = fn(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1, start=D(start), end=D(end), append=var, mode=m)
+    if asyncio.iscoroutine(res):  # the frozen fbb2926 reference is still async
+        res = asyncio.run(res)
+    _, df = res
     return df
 
 
@@ -185,7 +187,7 @@ def test_month_plot_error_registers_no_pyplot_figure(client):
 
     before_nums, before_live = plt.get_fignums(), _live_figures()
     with pytest.raises(ValueError):  # "abc" fails after the figure was created
-        asyncio.run(month_climatology(lon0=135, lat0=15, lon1=137, lat1=17, period="abc", sstvar="sst"))
+        month_climatology(lon0=135, lat0=15, lon1=137, lat1=17, period="abc", sstvar="sst")
     assert plt.get_fignums() == before_nums
     assert _live_figures() == before_live
 

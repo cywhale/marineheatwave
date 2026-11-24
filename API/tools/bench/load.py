@@ -1,7 +1,7 @@
 """Local concurrency / memory scenarios (spec 16 r3 §5.1). Never point this at production.
 
     .venv/bin/python -m tools.bench.load --base http://127.0.0.1:18030 --master-pid PID \
-        --scenario light|mixed|heavy2|leak|heavy_types|plot_month_large --expected-workers N --out DIR
+        --scenario light|mixed|heavy2|leak|heavy_types|plot_month_large|sub_<key>_x<1|4> --expected-workers N --out DIR
 
 RSS is sampled every 0.2 s per process.  Every process is recorded with PID,
 PPID, name and cmdline (for manual cross-checking) and given a role:
@@ -48,6 +48,16 @@ HEAVY = {
     "J11_global_json": "/api/mhw?lon0=-180&lon1=180&lat0=-90&lat1=90&start=2026-10-01&end=2026-10-01",
     "plot_month_large": "/api/mhw/plot?bbox=(-90,-60,0,60)&sstvar=sst&period=1982-2011,2012-2021,2022,2023&mode=month",
     "J08_csv_antimeridian": "/api/mhw/csv?lon0=170&lon1=-170&lat0=-5&lat1=5&start=2020-01-01&end=2021-12-01&append=sst",
+}
+# Largest JSON queries whose guard claim stays just below a threshold, so they
+# run unguarded and concurrently (P1-1c, Codex round 4).  The first two are just
+# below the 4 MiB P1-0 candidate (kept for the record: they exceeded the 1.5 GB
+# line); the last two are just below the 2 MiB default adopted in P1-1c.
+SUBTHRESHOLD = {
+    "global_1m_sst": "/api/mhw?lon0=-180&lon1=180&lat0=-90&lat1=90&start=2026-10-01&end=2026-10-01&append=sst",  # claim 3.97 MiB
+    "box10_10y_3var": "/api/mhw?lon0=130&lon1=140&lat0=10&lat1=20&start=2010-01-01&end=2019-12-01&append=sst,sst_anomaly,td",  # 3.66 MiB
+    "half_1m_sst": "/api/mhw?lon0=-180&lon1=-0.25&lat0=-90&lat1=90&start=2026-10-01&end=2026-10-01&append=sst",  # 1.98 MiB
+    "box9_10y_2var": "/api/mhw?lon0=130&lon1=139&lat0=10&lat1=19&start=2010-01-01&end=2019-12-01&append=sst,td",  # 1.78 MiB
 }
 LEAK = "/api/mhw/plot?bbox=(135,15,137,17)&period=1982-2011,2012-2021,2022&sstvar=sst&mode=month"
 MB = 1024 * 1024
@@ -375,9 +385,36 @@ def scenario_plot_month_large(base, sampler, timeout=DEFAULT_TIMEOUT):
         return {"plot_month_large": _measure_one(c, sampler, HEAVY["plot_month_large"])}
 
 
+def _measure_concurrent(base, sampler, path, n, timeout):
+    """n identical requests started together on one worker; worker RSS before / peak / after."""
+    time.sleep(1.0)
+    before = sampler.snapshot()
+    n0 = len(sampler.samples)
+    t0 = time.perf_counter()
+    reqs = run_threads(base, [[path] for _ in range(n)], timeout=timeout)
+    wall = time.perf_counter() - t0
+    time.sleep(1.0)
+    during = sampler.samples[n0:]
+    after = sampler.snapshot()
+    b = rss_by_pid(before, "worker")
+    peak = {pid: max([rss_by_pid(s, "worker").get(pid, 0.0) for s in during] + [rss_by_pid(after, "worker").get(pid, 0.0)])
+            for pid in b}
+    return {"path": path, "n": n, "wall": wall, "requests": reqs, "before": b, "peak": peak,
+            "after_1s": rss_by_pid(after, "worker"), "peak_minus_before": {pid: peak[pid] - b[pid] for pid in b},
+            "n_samples_during": len(during)}
+
+
+def _subthreshold(key, n):
+    def scenario(base, sampler, timeout=DEFAULT_TIMEOUT):
+        return {f"{key}_x{n}": _measure_concurrent(base, sampler, SUBTHRESHOLD[key], n, timeout)}
+    scenario.__doc__ = f"{n} x {key} at once on a fresh -w 1 worker (sub-threshold JSON)."
+    return scenario
+
+
 SCENARIOS = {"light": scenario_light, "mixed": scenario_mixed, "heavy2": scenario_heavy2,
              "leak": scenario_leak, "heavy_types": scenario_heavy_types,
              "plot_month_large": scenario_plot_month_large}
+SCENARIOS.update({f"sub_{k}_x{n}": _subthreshold(k, n) for k in SUBTHRESHOLD for n in (1, 4)})
 
 
 def run_scenario(name: str, base: str, master_pid: int, out_dir: Path, timeout: float = DEFAULT_TIMEOUT,

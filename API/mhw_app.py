@@ -14,6 +14,7 @@ from tempfile import NamedTemporaryFile
 from src.mhw_utils import process_mhw_data
 from src.mhw_plot import month_climatology, region_climatology, period2date
 from src.responses import TempFileResponse, remove_temp_file
+from src.guard import RequestGuard
 import src.config as config
 import logging
 
@@ -108,7 +109,7 @@ class MHWResponse(BaseModel):
 
 
 @app.get("/api/mhw", response_model=List[MHWResponse], tags=["Marine Heatwave"], summary="Query MHW data as JSON")
-async def read_mhw(
+def read_mhw(
     lon0: float = Query(...,
                         description="Minimum longitude, range: [-180, 180]"),
     lat0: float = Query(..., description="Minimum latitude, range: [-90, 90]"),
@@ -134,12 +135,14 @@ async def read_mhw(
     """
 
     try:
-        _, df = await process_mhw_data(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1, start=start, end=end, append=append)
-        if df.is_empty():
-            raise HTTPException(status_code=400, detail="No data available for the given parameters.")
-        # return JSONResponse(content=df.to_dict(orient='records')) #cannot handle NA when JSONResponse
-        # return JSONResponse(content=json.loads(df.to_json(orient='records'))) # work version in Pandas
-        return JSONResponse(content=df.to_dicts())
+        # P1-1c: the guard covers loading, to_dicts and JSONResponse rendering
+        with RequestGuard() as g:
+            _, df = process_mhw_data(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1, start=start, end=end, append=append, guard=g)
+            if df.is_empty():
+                raise HTTPException(status_code=400, detail="No data available for the given parameters.")
+            # return JSONResponse(content=df.to_dict(orient='records')) #cannot handle NA when JSONResponse
+            # return JSONResponse(content=json.loads(df.to_json(orient='records'))) # work version in Pandas
+            return JSONResponse(content=df.to_dicts())
 
     except HTTPException as herr:
         raise herr
@@ -150,7 +153,7 @@ async def read_mhw(
 
 
 @app.get("/api/mhw/csv", response_class=Response, tags=["Marine Heatwave"], summary="Query MHW data as CSV")
-async def read_mhw_csv(
+def read_mhw_csv(
     lon0: float = Query(...,
                         description="Minimum longitude, range: [-180, 180]"),
     lat0: float = Query(..., description="Minimum latitude, range: [-90, 90]"),
@@ -176,23 +179,26 @@ async def read_mhw_csv(
     """
 
     try:
-        out_file, df = await process_mhw_data(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1, start=start, end=end, append=append)
-        if df.is_empty():
-            raise HTTPException(status_code=400, detail="No data available for the given parameters.")
+        # P1-1c: the guard covers loading and write_csv; sending the file
+        # happens after return, outside the guard (small, reads from disk)
+        with RequestGuard() as g:
+            out_file, df = process_mhw_data(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1, start=start, end=end, append=append, guard=g)
+            if df.is_empty():
+                raise HTTPException(status_code=400, detail="No data available for the given parameters.")
 
-        temp_file = NamedTemporaryFile(delete=False)
-        try:
-            with temp_file:  # close our handle; polars writes by path
-                df.write_csv(temp_file.name)  # polars version
-            response = TempFileResponse(temp_file.name, media_type="text/csv", filename=out_file+".csv")
-        except BaseException:
-            # no response will own the file: remove it, then let the original
-            # error reach the handlers below unchanged
-            remove_temp_file(temp_file.name, during_error=True)
-            raise
-        # TempFileResponse deletes the file after sending (incl. Range 400/416
-        # early returns and send errors)
-        return response
+            temp_file = NamedTemporaryFile(delete=False)
+            try:
+                with temp_file:  # close our handle; polars writes by path
+                    df.write_csv(temp_file.name)  # polars version
+                response = TempFileResponse(temp_file.name, media_type="text/csv", filename=out_file+".csv")
+            except BaseException:
+                # no response will own the file: remove it, then let the original
+                # error reach the handlers below unchanged
+                remove_temp_file(temp_file.name, during_error=True)
+                raise
+            # TempFileResponse deletes the file after sending (incl. Range 400/416
+            # early returns and send errors)
+            return response
 
     except HTTPException as herr:
         raise herr
@@ -202,7 +208,7 @@ async def read_mhw_csv(
         raise HTTPException(status_code=500, detail="Internal server error. Please try it later or inform admin")
 
 @app.get("/api/mhw/plot", tags=["MHW_plot"], summary="Plot SST or SST Anomalies climatology as PNG", include_in_schema=False)
-async def climatology(
+def climatology(
     bbox: str = Query(..., description="Bounding-box (x0,y0,x1,y1),(...). Multi-bbox is allowed and x1, y1 can be skipped as point"),
     period: str = Query(..., description="Time period %Y%m%d-%Y%m%d,... Multi-period is allowed, and %m:month %d:day can be skipped"),
     sstvar: Optional[str] = Query(
@@ -220,30 +226,33 @@ async def climatology(
     * {mode} = series: Time-series e.g. /api/mhw/plot?bbox=(-90,-10,-80,0),(-150,-5,-90,5)&period=2015-202306&sstvar=sst_anomaly
     * {mode} = month: Month climatology. /api/mhw/plot?bbox=(-90,-60,0,60)&sstvar=sst&period=1982-2011,2012-2021,2022,2023&mode=month
     """
-    if not mode or mode.strip() not in ['month', 'series']:
-        mode = 'series'
+    # P1-1c: every plot is heavy; take the slot on entry and keep it through
+    # data, plot lock, savefig and response construction
+    with RequestGuard(heavy=True) as g:
+        if not mode or mode.strip() not in ['month', 'series']:
+            mode = 'series'
 
-    if mode == 'month':
-        bbox_list = bbox.strip('()').split('),(')
-        bbox_coords = [float(coord) for coord in bbox_list[0].split(',')]
-        if len(bbox_coords) == 2:
-            lon0, lat0, lon1, lat1 = bbox_coords[0], bbox_coords[1], None, None
-        elif len(bbox_coords) == 4:
-            lon0, lat0, lon1, lat1 = bbox_coords
+        if mode == 'month':
+            bbox_list = bbox.strip('()').split('),(')
+            bbox_coords = [float(coord) for coord in bbox_list[0].split(',')]
+            if len(bbox_coords) == 2:
+                lon0, lat0, lon1, lat1 = bbox_coords[0], bbox_coords[1], None, None
+            elif len(bbox_coords) == 4:
+                lon0, lat0, lon1, lat1 = bbox_coords
+            else:
+                raise HTTPException(
+                    status_code=400, detail="Invalid bounding box format. Must contain 2 or 4 coordinates.")
+
+            buf = month_climatology(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1, period=period, sstvar=sstvar, palette=palette, guard=g)
+
         else:
-            raise HTTPException(
-                status_code=400, detail="Invalid bounding box format. Must contain 2 or 4 coordinates.")
+            if period == "all":
+                start = '1982-01-01'
+                end = str((datetime.today() - pd.DateOffset(months=1)
+                           ).replace(day=1).date())
+            else:
+                start, end = period2date(period.strip().split(',')[0])
 
-        buf = await month_climatology(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1, period=period, sstvar=sstvar, palette=palette)
+            buf = region_climatology(bbox, start, end, sstvar, palette, guard=g)
 
-    else:
-        if period == "all":
-            start = '1982-01-01'
-            end = str((datetime.today() - pd.DateOffset(months=1)
-                       ).replace(day=1).date())
-        else:
-            start, end = period2date(period.strip().split(',')[0])
-
-        buf = await region_climatology(bbox, start, end, sstvar, palette)
-
-    return StreamingResponse(buf, media_type="image/png")
+        return StreamingResponse(buf, media_type="image/png")
