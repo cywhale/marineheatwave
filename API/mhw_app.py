@@ -13,6 +13,7 @@ from datetime import date, datetime  # , timedelta
 from tempfile import NamedTemporaryFile
 from src.mhw_utils import process_mhw_data
 from src.mhw_plot import month_climatology, region_climatology, period2date
+from src.responses import TempFileResponse, remove_temp_file
 import src.config as config
 import logging
 
@@ -180,10 +181,18 @@ async def read_mhw_csv(
             raise HTTPException(status_code=400, detail="No data available for the given parameters.")
 
         temp_file = NamedTemporaryFile(delete=False)
-        # df.to_csv(temp_file.name, index=False) #Pandas solution, work
-        df.write_csv(temp_file.name)  # polars version
-
-        return FileResponse(temp_file.name, media_type="text/csv", filename=out_file+".csv")
+        try:
+            with temp_file:  # close our handle; polars writes by path
+                df.write_csv(temp_file.name)  # polars version
+            response = TempFileResponse(temp_file.name, media_type="text/csv", filename=out_file+".csv")
+        except BaseException:
+            # no response will own the file: remove it, then let the original
+            # error reach the handlers below unchanged
+            remove_temp_file(temp_file.name, during_error=True)
+            raise
+        # TempFileResponse deletes the file after sending (incl. Range 400/416
+        # early returns and send errors)
+        return response
 
     except HTTPException as herr:
         raise herr
