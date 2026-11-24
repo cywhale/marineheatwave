@@ -14,14 +14,7 @@ from tempfile import NamedTemporaryFile
 from src.mhw_utils import process_mhw_data
 from src.mhw_plot import month_climatology, region_climatology, period2date
 import src.config as config
-# import json, dask
-# This is a more low-level way of setting up Dask for parallel computations, and it doesn't provide some of the additional features of Dask's own distributed scheduler, such as advanced task prioritization and data locality awareness.
-# from multiprocessing.pool import Pool
-# dask.config.set(pool=Pool(4))
-# from dask.distributed import Client
-# client = Client('tcp://localhost:8786')
 import logging
-from src.dask_client_manager import get_dask_client, close_dask_client
 
 LOG = logging.getLogger(__name__)
 
@@ -31,16 +24,18 @@ LOG = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # global dz # old use 'sst_anomaly.zarr', add sst -> mhw.zarr
-    config.dz = xr.open_zarr(
+    # Read directly with numpy-backed lazy arrays (P1-1a): no Dask graph and no
+    # shared Dask client.  cache=False so a whole-variable operation can never
+    # leave that variable resident in the worker (open_zarr does not accept it).
+    config.dz = xr.open_dataset(
         'data/mhw.zarr',
-        chunks='auto',
+        engine='zarr',
         group='anomaly',
+        chunks=None,
+        cache=False,
         decode_times=True,
         consolidated=True,
     )
-    config.dask_client = get_dask_client("mhwapi")
-    if config.dask_client is None:
-        LOG.warning("Dask scheduler unavailable; falling back to local execution.")
     config.gridSz = 0.25
     config.timeLimit = 365
     config.LON_RANGE_LIMIT = 90
@@ -51,8 +46,6 @@ async def lifespan(app: FastAPI):
     yield
     print("Application is shutting down!")
     config.dz.close()
-    close_dask_client("mhwapi")
-    config.dask_client = None
 
 #@app.on_event("shutdown")
 #async def shutdown_event():

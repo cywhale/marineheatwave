@@ -1,115 +1,15 @@
-import logging
-import os
-import threading
-import uuid
+"""No-op compatibility shim (P1-1a).
 
-from dask.distributed import Client
-from distributed.security import Security
+The MHW API no longer uses the shared Dask scheduler: data is read directly
+from zarr with numpy-backed arrays.  These functions are kept so that any
+external caller importing them keeps working; they never create a client and
+do not import ``distributed``.
+"""
 
-class DaskClientManager:
-    """
-    Manages Dask client connections with unique naming for different FastAPI services
-    """
-    def __init__(self, scheduler_address: str = None, service_name: str = None):
-        env_address = os.getenv("DASK_SCHEDULER_ADDRESS")
-        self.scheduler_address = scheduler_address or env_address or "tcp://localhost:8786"
-        # Generate a unique service identifier if none provided
-        self.service_name = service_name or f"service-{uuid.uuid4().hex[:8]}"
-        self.client = None
-        self._connect_lock = threading.Lock()
-        self._log = logging.getLogger(__name__)
 
-    def _connect(self):
-        try:
-            tls_settings = (
-                os.getenv("DASK_TLS_CA_FILE"),
-                os.getenv("DASK_TLS_CLIENT_CERT"),
-                os.getenv("DASK_TLS_CLIENT_KEY"),
-            )
-            if any(tls_settings) and not all(tls_settings):
-                raise ValueError("DASK TLS requires CA, client certificate, and client key")
-            if self.scheduler_address.startswith("tls://") and not all(tls_settings):
-                raise ValueError("TLS scheduler configured without complete DASK TLS credentials")
-            if all(tls_settings) and not self.scheduler_address.startswith("tls://"):
-                raise ValueError("DASK TLS credentials configured for a non-TLS scheduler address")
-            security = (
-                Security(
-                    tls_ca_file=tls_settings[0],
-                    tls_client_cert=tls_settings[1],
-                    tls_client_key=tls_settings[2],
-                    require_encryption=True,
-                )
-                if all(tls_settings)
-                else None
-            )
-            self.client = Client(
-                self.scheduler_address,
-                name=self.service_name,
-                set_as_default=True,
-                security=security,
-            )
+def get_dask_client(service_name: str):  # noqa: ARG001
+    return None
 
-            # Configure unique key prefix for this service
-            def key_prefix(key):
-                return f"{self.service_name}-{key}"
 
-            # Patch the client's key generation
-            self.client._graph_key_prefix = key_prefix
-            return self.client
-        except Exception as exc:
-            self._log.warning(
-                "Dask client connection failed for %s (%s): %s",
-                self.service_name,
-                self.scheduler_address,
-                exc,
-            )
-            self.client = None
-            return None
-
-    def _is_healthy(self) -> bool:
-        if self.client is None:
-            return False
-        if self.client.status in ("closed", "closing"):
-            return False
-        try:
-            self.client.scheduler_info()
-        except Exception:
-            return False
-        return True
-
-    def get_client(self):
-        """
-        Returns a configured Dask client with unique naming scheme
-        """
-        with self._connect_lock:
-            if self._is_healthy():
-                return self.client
-            if self.client is not None:
-                self.close()
-            return self._connect()
-
-    def close(self):
-        """
-        Properly close the client connection
-        """
-        if self.client is not None:
-            self.client.close()
-            self.client = None
-
-_MANAGERS = {}
-
-def _get_manager(service_name: str):
-    manager = _MANAGERS.get(service_name)
-    if manager is None:
-        manager = DaskClientManager(service_name=service_name)
-        _MANAGERS[service_name] = manager
-    return manager
-
-def get_dask_client(service_name: str):
-    manager = _get_manager(service_name)
-    return manager.get_client()
-
-def close_dask_client(service_name: str):
-    manager = _MANAGERS.get(service_name)
-    if manager is not None:
-        manager.close()
+def close_dask_client(service_name: str):  # noqa: ARG001
+    return None

@@ -6,7 +6,6 @@ from fastapi import HTTPException
 from typing import Optional
 from datetime import date, datetime, timedelta
 import src.config as config
-from src.dask_client_manager import get_dask_client
 import math
 
 
@@ -49,7 +48,6 @@ def output_df(df, isoTime=False):
 
 
 async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1: Optional[float], start: Optional[date], end: Optional[date], append: Optional[str], mode: Optional[str] = None):
-    config.dask_client = get_dask_client("mhwapi")
     if mode is None:
         mode = 'raw'
 
@@ -88,6 +86,10 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
     if end_date < start_date:
         start_date, end_date = end_date, start_date
 
+    # raw queries read only the requested variables (P1-1a); the plot modes
+    # still read the full Dataset until P1-1d.
+    ds = config.dz[variables] if mode == 'raw' else config.dz
+
     try:
         orig_lon0, orig_lon1 = lon0, lon1
 
@@ -97,7 +99,7 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
 
             out_file = (out_file + '_' + deg2str(lon0, True, orig_lon0 <= -179.875) + '_' + deg2str(lat0, False) +
                         '_' + 'Point' + '_' + str(start_date.date()) + '_' + str(end_date.date()))
-            data_subset = config.dz.sel(lon=slice(lon0, lon0+0.5*config.gridSz), lat=slice(
+            data_subset = ds.sel(lon=slice(lon0, lon0+0.5*config.gridSz), lat=slice(
                 lat0, lat0+0.5*config.gridSz), date=slice(start_date, end_date))
 
         else:
@@ -161,14 +163,14 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
                     lon0, lon1 = lon1, lon0
                     orig_lon0, orig_lon1 = orig_lon1, orig_lon0
 
-                subset1 = config.dz.sel(lon=slice(lon0, 360), lat=slice(
+                subset1 = ds.sel(lon=slice(lon0, 360), lat=slice(
                     lat0, lat1+offset_lat*config.gridSz), date=slice(start_date, end_date))
-                subset2 = config.dz.sel(lon=slice(0, lon1+offset_lon*config.gridSz), lat=slice(
+                subset2 = ds.sel(lon=slice(0, lon1+offset_lon*config.gridSz), lat=slice(
                     lat0, lat1+offset_lat*config.gridSz), date=slice(start_date, end_date))
                 data_subset = xr.concat([subset1, subset2], dim='lon')
             else:
                 # Requested area doesn't cross the zero meridian
-                data_subset = config.dz.sel(lon=slice(lon0, lon1+offset_lon*config.gridSz), lat=slice(
+                data_subset = ds.sel(lon=slice(lon0, lon1+offset_lon*config.gridSz), lat=slice(
                     lat0, lat1+offset_lat*config.gridSz), date=slice(start_date, end_date))
 
             out_file = (out_file + '_' + deg2str(lon0, True, orig_lon0 <= -179.875) + '_' + deg2str(lat0, False) +
@@ -184,10 +186,7 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
         if mode in ['area_mean_sst', 'area_mean_sst_anomaly']:
             # Perform the averaging using xarray
             area_mean = data_subset.mean(dim=['lon', 'lat'], skipna=True).dropna(
-                dim='date', how='all').compute(timeout='30s')
-            # Run the compute-intensive tasks in the Dask cluster
-            # future = client.submit(process_data_subset, data_subset) #, append=append
-            # area_mean = await client.gather(future)
+                dim='date', how='all')
             df = area_mean[['date', append]].to_dataframe().reset_index()
             # df.dropna(subset=[append], inplace=True)
             pl_df = output_df(df, False)
@@ -195,7 +194,7 @@ async def process_mhw_data(lon0: float, lat0: float, lon1: Optional[float], lat1
         elif mode == 'month_mean':
             # Segment the data by month first
             monthly_means = data_subset.groupby('date.month').mean(dim=['lon', 'lat'], skipna=True).dropna(
-                dim='date', how='all').compute(timeout='30s')
+                dim='date', how='all')
             df = monthly_means[['date', append]].to_dataframe().reset_index()
             pl_df = output_df(df, False)
 
