@@ -87,3 +87,17 @@ def test_gate_reports_a_bound_port():
         assert any("in use" in p for p in vc.gate(s.getsockname()[1]))
     finally:
         s.close()
+
+
+@pytest.mark.parametrize("step", ["echo", "golden", "smoke", "combo"])
+def test_scenario_output_name_follows_the_step_suffix(monkeypatch, tmp_path, step):
+    """V-c deviation: golden and golden_forcecompat wrote the same out/local_*.json."""
+    seen = []
+    monkeypatch.setattr(vc, "gate", lambda port: [])
+    monkeypatch.setattr(vc.cand, "run_step", lambda D, name, port, **k: seen.append((name, k["scenario_name"])) or 0)
+    import argparse
+    for suffix in ("", "_forcecompat"):
+        a = argparse.Namespace(port=1, python="/p", gunicorn="/g", worker_class="w.W", step_suffix=suffix)
+        vc.run_one(tmp_path, step, a, {}, None)
+    (n1, s1), (n2, s2) = seen
+    assert n2 == n1 + "_forcecompat" and s2 == s1 + "_forcecompat" and s1 != s2

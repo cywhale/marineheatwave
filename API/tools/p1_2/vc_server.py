@@ -140,18 +140,18 @@ def run_one(D: Path, step: str, a, extra_env: dict, expect_runtime: str | None) 
                                   worker_class=a.worker_class, workers=1, app="tools.p1_2.asgi_echo:app")
         argv[4:4] = ["--pythonpath", str(Path(__file__).resolve().parents[2])]  # the echo app lives with the tools
         rc = cand.run_step(D, name, a.port, argv=argv, expected_workers=1, scenario_fn=vb.scenario_echo,
-                           probe_path="/", ready_log=cand.error_log(D, name), scenario_name="asgi_echo",
+                           probe_path="/", ready_log=cand.error_log(D, name), scenario_name=f"asgi_echo{a.step_suffix}",
                            python=a.python, extra_env=extra_env, **LIMITS)
     elif step == "golden":
         rc = cand.run_step(D, name, a.port, expected_workers=2, workers=2, step_deadline=1800,
                            scenario_fn=with_maps(vb.make_scenario_golden(D, a.port), expect_runtime),
-                           scenario_name="vc_golden", **common)
+                           scenario_name=f"vc_golden{a.step_suffix}", **common)
     elif step in STAGE_B:
         fn = load.SCENARIOS[cand.STEPS[step]]
         if step == "smoke":
             fn = functools.partial(load.scenario_smoke_J01, out_dir=D / "out")
         rc = cand.run_step(D, name, a.port, expected_workers=1, workers=1, scenario_fn=with_maps(fn, expect_runtime),
-                           scenario_name=cand.STEPS[step], **common)
+                           scenario_name=f"{cand.STEPS[step]}{a.step_suffix}", **common)
     else:
         raise SystemExit(f"unknown step {step}")
     rec["exit"] = rc
