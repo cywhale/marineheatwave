@@ -70,18 +70,30 @@ def test_206_range_0_9(client, tmpdir_only):
     assert r.headers["content-type"] == C01_HEADERS["content-type"]
     assert r.headers["content-disposition"] == C01_HEADERS["content-disposition"]
     assert r.headers["accept-ranges"] == "bytes"
+    # nothing else besides the validators FileResponse always sends
+    assert set(r.headers) == {"content-range", "content-length", "content-type", "content-disposition",
+                              "accept-ranges", "etag", "last-modified"}
 
 
 def test_416_range_not_satisfiable(client, tmpdir_only):
+    """The whole 416 response.  The only accepted change from Starlette 0.x to
+    1.x is the unit in Content-Range; status, body and every other header must
+    stay exactly as before (checked on both Starlette versions)."""
     r = client.get(C01_URL, headers={"Range": "bytes=999999999-"})
     assert r.status_code == 416
-    assert r.headers["content-range"] == unsatisfiable_range(SIZE)
+    assert r.content == b""
+    assert dict(r.headers) == {
+        "content-length": "0",
+        "content-range": unsatisfiable_range(SIZE),
+        "content-type": "text/plain; charset=utf-8",
+    }
 
 
 def test_400_malformed_range(client, tmpdir_only):
     r = client.get(C01_URL, headers={"Range": "items=0-1"})
     assert r.status_code == 400
     assert r.text == "Only support bytes range"
+    assert dict(r.headers) == {"content-length": "24", "content-type": "text/plain; charset=utf-8"}
 
 
 @pytest.mark.parametrize("exc,status,detail", [
@@ -112,32 +124,60 @@ def test_no_background_unlink_task():
 # ------------------------------------------------------------ direct ASGI calls
 
 
+# The ASGI HTTP scope spec_version real servers send.  uvicorn (0.34.1 in the
+# P1-1 venv, 0.54.0 in the P1-2 candidate) sends "2.3" from every HTTP protocol
+# implementation (h11, httptools, zttp); test_uvicorn_http_spec_version pins it.
+# Below 2.4 Starlette 1.x FileResponse listens for http.disconnect while it
+# streams, which is the branch production takes.
+SPEC_VERSION = "2.3"
+
+
 def _scope(range_header=None, method="GET"):
     headers = [(b"range", range_header.encode())] if range_header else []
-    return {"type": "http", "method": method, "path": "/", "headers": headers}
+    return {"type": "http", "asgi": {"version": "3.0", "spec_version": SPEC_VERSION},
+            "http_version": "1.1", "method": method, "path": "/", "headers": headers}
 
 
 class _Client:
-    """ASGI client double that behaves like a real server's connection.
+    """ASGI connection double that follows uvicorn's HTTP cycle.
 
-    ``receive()`` does not return at once (the request has no body to deliver):
-    it waits until the response is complete (last body chunk sent) or sending
-    failed, then reports ``http.disconnect``.  Starlette 1.x FileResponse listens
-    for the disconnect while streaming (ASGI < 2.4); a receive that always
-    answered ``http.request`` at once made it busy-loop forever.  Older
-    Starlette never calls receive here, which is fine too.
+    * The first ``receive()`` returns the (empty) request body at once, as
+      uvicorn does for a GET whose body has been read.
+    * Later ``receive()`` calls wait until the client disconnects or the
+      response is complete (last body chunk sent, or sending raised), then
+      return ``http.disconnect``.
+    * ``disconnect_after_body_chunks=n`` simulates the client going away after
+      the n-th body chunk: like uvicorn, later ``send()`` calls are dropped
+      silently (no exception).
+
+    A ``receive`` that always answered ``http.request`` at once made Starlette
+    1.x FileResponse busy-loop forever; older Starlette never calls receive
+    here.
     """
 
-    def __init__(self, on_send=None):
+    def __init__(self, on_send=None, disconnect_after_body_chunks=None):
         self.on_send = on_send
-        self.sent: list[dict] = []
+        self.sent: list[dict] = []      # delivered to the client
+        self.dropped: list[dict] = []   # sent after the client went away
+        self.receives: list[str] = []
         self.done = asyncio.Event()
+        self.disconnect_after = disconnect_after_body_chunks
+        self.disconnected = False
+        self._request_delivered = False
 
     async def receive(self):
+        if not self._request_delivered:
+            self._request_delivered = True
+            self.receives.append("http.request")
+            return {"type": "http.request", "body": b"", "more_body": False}
         await self.done.wait()
+        self.receives.append("http.disconnect")
         return {"type": "http.disconnect"}
 
     async def send(self, msg):
+        if self.disconnected:
+            self.dropped.append(msg)
+            return
         self.sent.append(msg)
         try:
             if self.on_send is not None:
@@ -145,13 +185,21 @@ class _Client:
         except BaseException:
             self.done.set()
             raise
-        if msg["type"] == "http.response.body" and not msg.get("more_body", False):
-            self.done.set()
+        if msg["type"] == "http.response.body":
+            n = sum(m["type"] == "http.response.body" for m in self.sent)
+            if self.disconnect_after is not None and n >= self.disconnect_after:
+                self.disconnected = True
+                self.done.set()
+            elif not msg.get("more_body", False):
+                self.done.set()
+
+    def body(self):
+        return b"".join(m.get("body", b"") for m in self.sent if m["type"] == "http.response.body")
 
 
-def _run(resp, scope, on_send=None):
+def _run(resp, scope, on_send=None, **client_kw):
     async def go():
-        c = _Client(on_send)
+        c = _Client(on_send, **client_kw)
         await resp(scope, c.receive, c.send)
         return c
     return asyncio.run(go())
@@ -214,7 +262,49 @@ def test_direct_call_416_removes_file_with_starlette_header(tmpdir_only):
     start = c.sent[0]
     assert start["status"] == 416
     headers = {k.decode().lower(): v.decode() for k, v in start["headers"]}
-    assert headers["content-range"] == unsatisfiable_range(16)
+    assert headers == {"content-length": "0", "content-range": unsatisfiable_range(16),
+                       "content-type": "text/plain; charset=utf-8"}
+    assert c.body() == b""
+    # tmpdir_only asserts that the file is gone
+
+
+def test_uvicorn_http_spec_version():
+    """The scope used above matches what the installed uvicorn sends (all HTTP
+    protocol implementations); if uvicorn moves to 2.4, Starlette 1.x stops
+    listening for disconnects and the tests below must be revisited."""
+    import re
+
+    import uvicorn.protocols.http as h
+
+    found = {}
+    for f in Path(h.__file__).parent.glob("*.py"):
+        for v in re.findall(r'"spec_version":\s*"([0-9.]+)"', f.read_text()):
+            found.setdefault(v, []).append(f.name)
+    assert set(found) == {SPEC_VERSION}, found
+
+
+BIG = 300_000  # more than four 64 KiB FileResponse chunks
+
+
+@pytest.mark.parametrize("range_header", [None, "bytes=0-199999"])
+def test_client_disconnect_mid_body_removes_file(tmpdir_only, range_header):
+    """The client goes away after the first body chunk.  No exception reaches
+    the server (uvicorn drops later sends), only the first chunk was delivered,
+    and the temporary file is removed.  Starlette 1.x notices the disconnect
+    (it was waiting in receive) and stops streaming; older Starlette never
+    listens and keeps sending into the void."""
+    data = bytes(range(256)) * (BIG // 256) + b"x" * (BIG % 256)
+    path = _make_file(tmpdir_only, data)
+    c = _run(TempFileResponse(path, media_type="text/csv"), _scope(range_header), disconnect_after_body_chunks=1)
+    assert c.sent[0]["status"] == (206 if range_header else 200)
+    body_msgs = [m for m in c.sent if m["type"] == "http.response.body"]
+    assert len(body_msgs) == 1 and body_msgs[0]["more_body"] is True
+    assert data.startswith(c.body()) and 0 < len(c.body()) < len(data)
+    if STARLETTE_1:
+        assert c.receives == ["http.request", "http.disconnect"]
+        assert len(c.dropped) <= 1  # cancelled at its next await (0 in every local run)
+    else:
+        assert c.receives == [] and c.dropped  # kept sending after the disconnect
     # tmpdir_only asserts that the file is gone
 
 

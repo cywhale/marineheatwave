@@ -24,7 +24,8 @@ import pytest
 from polars.testing import assert_frame_equal
 
 from tests.reference import mhw_utils_fbb2926 as ref
-from tests.test_p1_1a import COORDS, _vars_read, chunk_reads
+from tests.test_p1_1a import COORDS, chunk_reads
+from tests.zarr_spy import fetched_vars
 
 # --------------------------------------------------------------- disk reads
 
@@ -42,7 +43,7 @@ def test_plot_reads_only_its_variable(client, url, expected):
         r = client.get(url)
     assert r.status_code == 200
     assert r.headers["content-type"] == "image/png"
-    assert _vars_read(keys) - COORDS == expected
+    assert fetched_vars(keys, COORDS) == expected
 
 
 # ------------------------------------------- plot input series vs old path

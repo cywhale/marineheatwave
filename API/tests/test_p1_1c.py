@@ -185,7 +185,7 @@ def test_slot_taken_before_any_data_read(client, guard_cfg, cid):
     assert_golden(cid, r)
     assert len(at_acquire) == 1, "exactly one acquire per request"
     assert at_acquire[0] == [], f"data read before the slot: {at_acquire[0][:5]}"
-    assert data_var_keys(keys, COORDS), "the spy saw no data read at all"  # data was read afterwards
+    assert data_var_keys(keys.fetched, COORDS), "the spy saw no data fetched at all"  # data was read afterwards
 
 
 def test_no_data_read_while_plot_lock_held(client, guard_cfg):
@@ -195,11 +195,18 @@ def test_no_data_read_while_plot_lock_held(client, guard_cfg):
     from tests.zarr_spy import chunk_reads, data_keys
 
     guard_cfg()
+    # Serial execution is what makes PLOT_LOCK.locked() mean "this request holds
+    # it": nothing else holds the lock or a heavy slot before we start, the two
+    # requests are sent one after the other from this thread, and the guard's
+    # own counters show that no two heavy requests overlapped.
+    assert not G.PLOT_LOCK.locked() and G.stats["active"] == G.stats["waiting"] == 0
     under_lock = []
     with chunk_reads(on_read=lambda k: under_lock.append(k) if G.PLOT_LOCK.locked() else None) as reads:
         for cid in ("P03", "P01"):
             assert_golden(cid, client.get(url(cid)))
-    assert data_keys(reads), "the spy saw no data read"
+    assert G.stats == {"waiting": 0, "active": 0, "max_active": 1, "acquired": 2, "released": 2}, G.stats
+    assert not G.PLOT_LOCK.locked()
+    assert data_keys(reads.fetched), "the spy saw no data fetched"
     assert data_keys(under_lock) == [], under_lock[:5]
 
 

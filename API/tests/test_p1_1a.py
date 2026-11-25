@@ -167,7 +167,7 @@ def test_opened_dataset_has_no_dask_or_memory_cache(client):
 # The spy lives in tests/zarr_spy.py (zarr 2 DirectoryStore and zarr 3 LocalStore);
 # metadata documents (.zarray, .zmetadata, zarr.json, ...) never count as a variable read.
 
-from tests.zarr_spy import ZARR_MAJOR, chunk_reads, data_keys  # noqa: E402
+from tests.zarr_spy import ZARR_MAJOR, chunk_reads, data_keys, fetched_vars  # noqa: E402
 from tests.zarr_spy import vars_read as _vars_read  # noqa: E402
 
 
@@ -181,11 +181,21 @@ def test_spy_records_a_small_slice_and_nothing_for_lazy_inspection(client):
         _ = config.dz["sst"].chunks, config.dz["sst"].dtype, config.dz["sst"].shape
     assert kinds and data_keys(keys) == [], data_keys(keys)[:5]  # lazy inspection reads no chunk
 
+    # sst chunks are (2, 180, 360): date 0, lat 300:302, lon 600:602 is chunk 0.1.1,
+    # an all-ocean patch (no NaN) in the Coral Sea
     with chunk_reads() as keys:
-        v = config.dz["sst"].isel(date=0, lat=slice(400, 402), lon=slice(500, 502)).values
-    assert v.shape == (2, 2)
-    assert _vars_read(keys) - COORDS == {"sst"}, sorted(keys)[:10]
-    assert all(k.startswith("anomaly/sst/") for k in data_keys(keys) if "/sst/" in k)
+        v = config.dz["sst"].isel(date=0, lat=slice(300, 302), lon=slice(600, 602)).values
+    assert fetched_vars(keys, COORDS) == {"sst"}, (sorted(keys)[:10], keys.missing)
+    assert "anomaly/sst/0.1.1" in keys.fetched and keys.missing == []
+    if ZARR_MAJOR >= 3:  # the app uses the default (async) pipeline, not LocalStore.get_sync
+        assert {m for m, _ in keys.methods} <= {"get", "get_partial_values"}, keys.methods
+    # the values are the chunk's data, compared with an independent read of the store
+    import numpy as np
+    import zarr
+
+    raw = zarr.open_group(str(API / "data/mhw.zarr"), mode="r")["anomaly/sst"][0, 300:302, 600:602]
+    assert v.shape == (2, 2) and np.isfinite(v).all()
+    np.testing.assert_array_equal(v, raw)
 
 
 @pytest.mark.parametrize("url,expected", [
@@ -201,7 +211,7 @@ def test_raw_reads_only_requested_variables(client, url, expected):
     with chunk_reads() as keys:
         r = client.get(url)
     assert r.status_code == 200
-    read = _vars_read(keys) - COORDS
+    read = fetched_vars(keys, COORDS)
     assert read == expected, (read, sorted(keys)[:20])
 
 
@@ -211,7 +221,7 @@ def test_plot_reads_only_plotted_variable(client):
     with chunk_reads() as keys:
         r = client.get("/api/mhw/plot?bbox=(135,15,137,17)&period=2019-202006&sstvar=sst&mode=series")
     assert r.status_code == 200
-    assert _vars_read(keys) - COORDS == {"sst"}
+    assert fetched_vars(keys, COORDS) == {"sst"}
 
 
 # ------------------------------------------------- equivalence with 0.2.8 path
