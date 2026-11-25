@@ -10,6 +10,8 @@ import sys
 import zlib
 from pathlib import Path
 
+import pytest
+
 from tools.p1_2 import append_server as aps
 from tools.p1_2 import points as P
 from tools.p1_2 import updater_check as uc
@@ -93,3 +95,49 @@ def test_run_audit_records_dotenv_socket_subprocess_and_outside_writes(tmp_path)
     assert any(e.startswith("socket.") for e in ev["socket"])
     assert ev["subprocess"]
     assert ev["write_outside"] == [str(outside / "c")] and ev["write_opens_in_store"] == 1
+
+
+# ---- Codex r22 (Minor): the response's month list must be exactly the queried range
+
+_WANT2 = {"2026-11-01": {"sst": 20.0, "sst_anomaly": 0.5, "level": 1.0, "td": None},
+          "2026-12-01": {"sst": 20.1, "sst_anomaly": 0.625, "level": 2.0, "td": None}}
+
+
+def _row(month, **kw):
+    w = _WANT2.get(month, _WANT2["2026-11-01"])
+    return {"date": month, **w, **kw}
+
+
+def test_compare_exact_month_list_passes():
+    res = P.compare([_row("2026-11-01"), _row("2026-12-01")], _WANT2)
+    assert res["match"] and res["date_list_match"] and res["n_rows"] == 2 == res["n_want"]
+    assert res["dates_got"] == res["dates_want"] == ["2026-11-01", "2026-12-01"]
+
+
+@pytest.mark.parametrize("months", [
+    ["2026-10-01", "2026-11-01", "2026-12-01"],   # a month before the queried range
+    ["2026-11-01", "2026-12-01", "2027-01-01"],   # a month after it
+    ["2026-12-01", "2026-11-01"],                 # wrong order
+    ["2026-11-01", "2026-11-01", "2026-12-01"],   # duplicate
+    ["2026-11-01"],                               # missing month
+    [],                                           # no rows
+    ["2026-11-01", "2026-12-01", ""],             # a row without a date
+])
+def test_compare_rejects_a_wrong_month_list(months):
+    rows = [_row(m) if m else {"date": None} for m in months]
+    res = P.compare(rows, _WANT2)
+    assert not res["match"] and not res["date_list_match"] and res["dates_got"] == [m or "None" for m in months]
+
+
+def test_compare_extra_month_fails_even_when_every_wanted_month_matches():
+    rows = [_row("2026-11-01"), _row("2026-12-01"), _row("2027-01-01")]
+    res = P.compare(rows, _WANT2)
+    assert all(m["match"] for m in res["months"].values()) and not res["match"]
+
+
+def test_compare_csv_month_list_and_tolerances_kept():
+    csv_rows = [{"date": "2026-11-01", "sst": "20.003", "sst_anomaly": "0.500004", "level": "1", "td": ""},
+                {"date": "2026-12-01", "sst": "20.1", "sst_anomaly": "0.625", "level": "2", "td": ""}]
+    assert P.compare(csv_rows, _WANT2, default_tol=1e-5)["match"]
+    assert not P.compare(csv_rows[::-1], _WANT2, default_tol=1e-5)["match"]
+    assert not P.compare([dict(csv_rows[0], td="1.0"), csv_rows[1]], _WANT2, default_tol=1e-5)["match"]  # NaN kept

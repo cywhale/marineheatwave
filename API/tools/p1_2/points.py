@@ -29,13 +29,27 @@ def _num(v):
     return float(v)
 
 
+def row_month(r: dict) -> str:
+    return str(r.get("date", ""))[:10]
+
+
 def compare(rows: list[dict], want: dict[str, dict], default_tol: float = 1e-9) -> dict:
     """rows: API rows (JSON objects or CSV dicts); want: month "YYYY-MM-DD" ->
-    {field: value or None}.  Exactly one row per wanted month, values within TOL
-    (default_tol for the other fields: 1e-9 for JSON, 1e-5 for CSV text)."""
-    out = {"months": {}, "match": True, "default_tol": default_tol}
+    {field: value or None}.
+
+    The rows' months, in response order, must be exactly the wanted months in
+    ascending order (Codex r22: no month outside the range, no duplicate, none
+    missing, row count = month count; the API selects with a date slice, so its
+    rows are chronological).  Each month's values must be within TOL
+    (default_tol for the other fields: 1e-9 for JSON, 1e-5 for CSV text); a
+    NaN / null is matched only by NaN / null."""
+    want_months = sorted(want)
+    got_months = [row_month(r) for r in rows]
+    out = {"months": {}, "default_tol": default_tol, "n_rows": len(rows), "n_want": len(want_months),
+           "dates_got": got_months, "dates_want": want_months, "date_list_match": got_months == want_months}
+    out["match"] = out["date_list_match"]
     for month, w in want.items():
-        hit = [r for r in rows if str(r.get("date", ""))[:10] == month]
+        hit = [r for r in rows if row_month(r) == month]
         m = {"n_rows": len(hit)}
         if len(hit) == 1:
             got = {k: _num(hit[0].get(k)) for k in FIELDS}
