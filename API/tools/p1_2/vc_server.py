@@ -60,6 +60,31 @@ QUERIES = {"Q1": load.J01, "Q3": "/api/mhw?lon0=135.3&lat0=15.3&start=1982-01-01
 # ------------------------------------------------------------------ helpers
 
 
+def updater_state() -> dict:
+    """{"running": [pids], "undetermined": [...]}.  Fail closed (r21): a process
+    whose command line cannot be read, or a process table that cannot be listed,
+    makes the state undetermined instead of "no update_mhw".  A process that is
+    gone (or a zombie, which has already exited) is skipped."""
+    st: dict = {"running": [], "undetermined": []}
+    me = os.getpid()
+    try:
+        procs = list(psutil.process_iter())
+    except Exception as exc:  # noqa: BLE001 - any failure here is "unknown"
+        st["undetermined"].append(f"process table: {type(exc).__name__}: {exc}")
+        return st
+    for p in procs:
+        try:
+            cmd = p.cmdline()
+        except psutil.NoSuchProcess:  # includes ZombieProcess
+            continue
+        except Exception as exc:  # noqa: BLE001 - AccessDenied and anything else
+            st["undetermined"].append(f"pid {p.pid}: {type(exc).__name__}")
+            continue
+        if p.pid != me and any("update_mhw" in x for x in cmd):
+            st["running"].append(p.pid)
+    return st
+
+
 def gate(port: int) -> list[str]:
     """Reasons not to start a server now (empty = go)."""
     probs = []
@@ -68,13 +93,12 @@ def gate(port: int) -> list[str]:
         probs.append(f"MemAvailable {avail / GIB:.1f} GiB < 8 GiB")
     if not pi.port_free(port):
         probs.append(f"port {port} in use")
-    me = os.getpid()
-    for p in psutil.process_iter(["pid", "cmdline"]):
-        try:
-            if p.info["pid"] != me and any("update_mhw" in x for x in (p.info["cmdline"] or [])):
-                probs.append(f"update_mhw running (pid {p.info['pid']})")
-        except psutil.Error:
-            pass
+    st = updater_state()
+    for pid in st["running"]:
+        probs.append(f"update_mhw running (pid {pid})")
+    if st["undetermined"]:
+        probs.append(f"update_mhw state undetermined ({len(st['undetermined'])} unreadable: "
+                     f"{', '.join(st['undetermined'][:5])})")
     return probs
 
 

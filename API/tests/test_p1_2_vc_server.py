@@ -101,3 +101,51 @@ def test_scenario_output_name_follows_the_step_suffix(monkeypatch, tmp_path, ste
         vc.run_one(tmp_path, step, a, {}, None)
     (n1, s1), (n2, s2) = seen
     assert n2 == n1 + "_forcecompat" and s2 == s1 + "_forcecompat" and s1 != s2
+
+
+class _P:
+    def __init__(self, pid, cmd=None, exc=None):
+        self.pid, self._cmd, self._exc = pid, cmd, exc
+
+    def cmdline(self):
+        if self._exc:
+            raise self._exc
+        return self._cmd
+
+
+def _gate_with(monkeypatch, procs=None, iter_exc=None):
+    import psutil
+
+    def fake_iter(*a, **k):
+        if iter_exc:
+            raise iter_exc
+        return iter(procs)
+    monkeypatch.setattr(vc.psutil, "process_iter", fake_iter)
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return [p for p in vc.gate(port) if "update_mhw" in p], psutil
+
+
+def test_gate_unreadable_process_is_undetermined_not_clear(monkeypatch):
+    import psutil
+    got, _ = _gate_with(monkeypatch, [_P(10, ["bash"]), _P(11, exc=psutil.AccessDenied(11))])
+    assert len(got) == 1 and "undetermined" in got[0] and "pid 11: AccessDenied" in got[0]
+
+
+def test_gate_process_table_failure_is_undetermined(monkeypatch):
+    got, _ = _gate_with(monkeypatch, iter_exc=PermissionError("no /proc"))
+    assert len(got) == 1 and "undetermined" in got[0] and "process table" in got[0]
+
+
+def test_gate_gone_and_zombie_processes_are_skipped(monkeypatch):
+    import psutil
+    got, _ = _gate_with(monkeypatch, [_P(10, exc=psutil.NoSuchProcess(10)), _P(12, exc=psutil.ZombieProcess(12)),
+                                      _P(13, ["python3", "x.py"])])
+    assert got == []
+
+
+def test_gate_running_updater_blocks(monkeypatch):
+    got, _ = _gate_with(monkeypatch, [_P(20, ["python3", "update_mhw.py"])])
+    assert got == ["update_mhw running (pid 20)"]
