@@ -1,7 +1,12 @@
 """Local concurrency / memory scenarios (spec 16 r3 §5.1). Never point this at production.
 
     .venv/bin/python -m tools.bench.load --base http://127.0.0.1:18030 --master-pid PID \
-        --scenario light|mixed|heavy2|leak|heavy_types|plot_month_large|sub_<key>_x<1|4> --expected-workers N --out DIR
+        --scenario light|mixed|heavy2|leak|heavy_types|plot_month_large|sub_<key>_x<1|4>
+                   |smoke_J01|single_J08_csv_antimeridian|single_J11_global_json|combo_p11 \
+        --expected-workers N --out DIR
+
+The last four are the per-step scenarios of the isolated candidate runner
+(tools/bench/candidate.py, doc 24 r4); every request records the sha256 of its body.
 
 RSS is sampled every 0.2 s per process.  Every process is recorded with PID,
 PPID, name and cmdline (for manual cross-checking) and given a role:
@@ -33,6 +38,7 @@ scenario (a scenario issues many requests); there is no overall deadline.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import threading
@@ -59,6 +65,10 @@ SUBTHRESHOLD = {
     "half_1m_sst": "/api/mhw?lon0=-180&lon1=-0.25&lat0=-90&lat1=90&start=2026-10-01&end=2026-10-01&append=sst",  # 1.98 MiB
     "box9_10y_2var": "/api/mhw?lon0=130&lon1=139&lat0=10&lat1=19&start=2010-01-01&end=2019-12-01&append=sst,td",  # 1.78 MiB
 }
+# Smoke sample for the candidate runner: golden J01 (tests/golden/manifest.json;
+# tests/test_bench_candidate.py checks that the two values stay equal).
+J01 = "/api/mhw?lon0=135&lat0=15&start=1982-01-01&end=2026-10-01"
+GOLDEN_J01_SHA256 = "f377522aa11af1cf52d5507b8c773eec9fdf5c622cae9a098aa589efef5b133c"
 LEAK = "/api/mhw/plot?bbox=(135,15,137,17)&period=1982-2011,2012-2021,2022&sstvar=sst&mode=month"
 MB = 1024 * 1024
 DEFAULT_TIMEOUT = 600.0
@@ -209,14 +219,19 @@ def rss_by_pid(snap: dict, role: str | None = None) -> dict[int, float]:
 # ---------------------------------------------------------------------- requests
 
 
-def timed_get(client: httpx.Client, path: str) -> dict:
-    """One request with wall-clock start/end; transport errors propagate."""
+def timed_get(client: httpx.Client, path: str, save_to: Path | None = None) -> dict:
+    """One request with wall-clock start/end and the body's sha256; transport
+    errors propagate.  The body is written to ``save_to`` only when given."""
     start = time.time()
     t0 = time.perf_counter()
     r = client.get(path)
     body = r.content
-    return {"path": path, "status": r.status_code, "start": start, "end": time.time(),
-            "seconds": time.perf_counter() - t0, "bytes": len(body)}
+    out = {"path": path, "status": r.status_code, "start": start, "end": time.time(),
+           "seconds": time.perf_counter() - t0, "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+    if save_to is not None:
+        Path(save_to).write_bytes(body)
+        out["saved_to"] = str(save_to)
+    return out
 
 
 def check_results(results: list[dict], expected: int, errors: list[dict], expect_status: int = 200) -> None:
@@ -404,6 +419,59 @@ def _measure_concurrent(base, sampler, path, n, timeout):
             "n_samples_during": len(during)}
 
 
+def scenario_smoke_J01(base, sampler, timeout=DEFAULT_TIMEOUT, out_dir: Path | None = None):
+    """Golden J01 once; its sha256 must equal the golden value (a smoke sample, not a
+    check of the whole store).  Only this scenario keeps a response body."""
+    with httpx.Client(base_url=base, timeout=timeout) as c:
+        r = timed_get(c, J01, save_to=(Path(out_dir) / "j01.json") if out_dir else None)
+    check_results([r], 1, [])
+    if r["sha256"] != GOLDEN_J01_SHA256:
+        raise LoadError("smoke J01 sha256 differs from golden",
+                        [{"kind": "sha256", "got": r["sha256"], "expected": GOLDEN_J01_SHA256}])
+    return {"J01": r, "golden_sha256": GOLDEN_J01_SHA256}
+
+
+def _single(key):
+    def scenario(base, sampler, timeout=DEFAULT_TIMEOUT):
+        with httpx.Client(base_url=base, timeout=timeout) as c:
+            return {key: _measure_one(c, sampler, HEAVY[key])}
+    scenario.__doc__ = f"{key} alone on a freshly started -w 1 server."
+    return scenario
+
+
+COMBO_LIGHT = ["half_1m_sst"] * 4
+
+
+def scenario_combo_p11(base, sampler, timeout=DEFAULT_TIMEOUT):
+    """1 large month plot + 4 half-globe 1-month sst JSON (just below 2 MiB) + 1 J01,
+    all started together on one worker.  Measured directly, never summed from
+    single runs.  Valid only if every other request's interval overlaps the plot's."""
+    paths = [HEAVY["plot_month_large"]] + [SUBTHRESHOLD[k] for k in COMBO_LIGHT] + [J01]
+    time.sleep(1.0)
+    before = sampler.snapshot()
+    n0 = len(sampler.samples)
+    t0 = time.perf_counter()
+    reqs = run_threads(base, [[p] for p in paths], timeout=timeout)
+    wall = time.perf_counter() - t0
+    time.sleep(1.0)
+    during = sampler.samples[n0:]
+    after = sampler.snapshot()
+    b = rss_by_pid(before, "worker")
+    peak = {pid: max([rss_by_pid(s, "worker").get(pid, 0.0) for s in during] + [rss_by_pid(after, "worker").get(pid, 0.0)])
+            for pid in b}
+    plot = next(r for r in reqs if r["path"] == paths[0])
+    others = [r for r in reqs if r is not plot]
+    overlap = [{"path": r["path"], "start": r["start"], "end": r["end"],
+                "overlaps_plot": r["start"] < plot["end"] and r["end"] > plot["start"]} for r in others]
+    if not all(o["overlaps_plot"] for o in overlap):
+        raise LoadError("combo requests did not overlap the plot", [{"kind": "no_overlap", "plot": plot,
+                                                                       "others": overlap}])
+    return {"combo_p11": {"paths": paths, "wall": wall, "requests": reqs, "overlap": overlap,
+                          "before": b, "peak": peak, "after_1s": rss_by_pid(after, "worker"),
+                          "peak_minus_before": {pid: peak[pid] - b[pid] for pid in b},
+                          "n_samples_during": len(during)}}
+
+
 def _subthreshold(key, n):
     def scenario(base, sampler, timeout=DEFAULT_TIMEOUT):
         return {f"{key}_x{n}": _measure_concurrent(base, sampler, SUBTHRESHOLD[key], n, timeout)}
@@ -415,6 +483,10 @@ SCENARIOS = {"light": scenario_light, "mixed": scenario_mixed, "heavy2": scenari
              "leak": scenario_leak, "heavy_types": scenario_heavy_types,
              "plot_month_large": scenario_plot_month_large}
 SCENARIOS.update({f"sub_{k}_x{n}": _subthreshold(k, n) for k in SUBTHRESHOLD for n in (1, 4)})
+SCENARIOS.update({"smoke_J01": scenario_smoke_J01,
+                  "single_J08_csv_antimeridian": _single("J08_csv_antimeridian"),
+                  "single_J11_global_json": _single("J11_global_json"),
+                  "combo_p11": scenario_combo_p11})
 
 
 def run_scenario(name: str, base: str, master_pid: int, out_dir: Path, timeout: float = DEFAULT_TIMEOUT,
