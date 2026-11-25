@@ -17,6 +17,17 @@ Chained appends (P1-2, owner 2026-11-25: 538 -> 539 -> 540 months):
     updater_check.py diff --before snap_{N-1}.json --after snap_N.json --out diff_N.json
     updater_check.py verify ... --before-store META_BEFORE_N --earlier-fixtures FIX1 --no-api
     updater_check.py expect-points --fixtures FIX1 --fixtures FIX2 --out points.json  # for append_server
+    updater_check.py check-result --file verify_N.json --expect ok            # 0 only when ok is true
+    updater_check.py check-result --file neg.json --expect fail --expect-failed dates_last_is_fixture_month
+
+Exit status (Codex r22: a failed check must not look like success):
+    0  the command ran and its result is ok (run / verify / api-check), or
+       check-result found the result as expected
+    1  the command itself crashed (Python traceback; the JSON may be missing)
+    2  usage error (argparse)
+    3  run / verify / api-check: the JSON result was written completely and
+       says ok=false (``failed_checks`` names the checks)
+    4  check-result: the result is not as expected (or unreadable)
 
 Fixture assumptions (not verified against the real DB / NOAA, which this round
 may not contact):
@@ -54,6 +65,21 @@ VARS = ("sst", "sst_anomaly", "level", "td")
 if __package__ in (None, ""):  # run as a script (python -I tools/p1_2/updater_check.py): find tools/
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tools.p1_2.points import SAMPLES  # noqa: E402  (same five points everywhere)
+
+EXIT_OK, EXIT_CRASH, EXIT_USAGE, EXIT_RESULT_FAILED, EXIT_UNEXPECTED = range(5)
+
+
+def result_exit(rep: dict) -> int:
+    """EXIT_OK only for a result whose ``ok`` is a real True."""
+    return EXIT_OK if rep.get("ok") is True else EXIT_RESULT_FAILED
+
+
+def with_checks(rep: dict, checks: dict) -> dict:
+    """Record named checks; ``ok`` is true only when every check is."""
+    rep["checks"] = {k: bool(v) for k, v in checks.items()}
+    rep["failed_checks"] = sorted(k for k, v in rep["checks"].items() if not v)
+    rep["ok"] = not rep["failed_checks"]
+    return rep
 
 
 def _month_after(d: date) -> date:
@@ -348,8 +374,12 @@ def cmd_run(a):
     xr.Dataset.to_zarr = timed_to_zarr
     upd.zarr.consolidate_metadata = timed_consolidate
 
+    error = None
     with tempfile.TemporaryDirectory() as cwd:  # relative paths in the module must not matter
-        events, hook = _audit_recorder(store, [store, cwd, tempfile.gettempdir()])
+        # the allowed write roots, as resolved paths (doc 28 r6: TMPDIR is the
+        # isolated work-dir tmp/ in append_chain.sh, so gettempdir() is not /tmp)
+        roots = [store, cwd, tempfile.gettempdir()]
+        events, hook = _audit_recorder(store, roots)
         sys.addaudithook(hook)  # cannot be removed; this process ends after the run
         start_dir = os.getcwd()
         os.chdir(cwd)
@@ -358,6 +388,10 @@ def cmd_run(a):
         try:
             with contextlib.redirect_stdout(buf):
                 upd.append_to_zarr()
+        except Exception as exc:  # recorded; the JSON is still written and the exit status is 3
+            import traceback
+            error = {"type": type(exc).__name__, "message": str(exc)[:2000],
+                     "traceback_tail": traceback.format_exc()[-4000:]}
         finally:
             dt = time.perf_counter() - t
             os.chdir(start_dir)  # never stay in a directory that is about to be removed
@@ -365,20 +399,49 @@ def cmd_run(a):
     print(out)
     rep = {"seconds_total": round(dt, 3), "timings": timings, "queries": queries, "calls": calls,
            "network_attempts_blocked": len(_NET_ATTEMPTS), "audit": events,
-           "completed": "All work append to zarr done" in out, "stdout_tail": out[-2000:]}
+           "allowed_write_roots": [os.path.realpath(r) for r in roots],
+           "tempfile_gettempdir": os.path.realpath(tempfile.gettempdir()),
+           "error": error, "completed": error is None and "All work append to zarr done" in out,
+           "stdout_tail": out[-2000:]}
     rep["no_external_access"] = (not events["socket"] and not events["urllib"] and not events["subprocess"]
                                  and not events["dotenv_file_open"] and not _NET_ATTEMPTS
                                  and calls["requests_get"] == 0 and not events["write_outside"]
                                  and not events["hook_errors"])
+    with_checks(rep, run_checks(rep))
     if out_path:
         out_path.write_text(json.dumps(rep, indent=1, default=str))
     print(json.dumps({k: v for k, v in rep.items() if k not in ("stdout_tail",)}, indent=1, default=str))
+    return result_exit(rep)
+
+
+def run_checks(rep: dict) -> dict:
+    """Named checks of a ``run`` report (pure, for the tests)."""
+    ev = rep["audit"]
+    return {"no_error": rep.get("error") is None,
+            "completed": rep["completed"],
+            "no_external_access": rep["no_external_access"],
+            "no_dotenv_open": not ev["dotenv_file_open"],
+            "no_socket_urllib_subprocess": not (ev["socket"] or ev["urllib"] or ev["subprocess"]),
+            "no_network_attempt": rep["network_attempts_blocked"] == 0 and rep["calls"]["requests_get"] == 0,
+            "no_write_outside": not ev["write_outside"],
+            "no_audit_hook_errors": not ev["hook_errors"]}
 
 
 # -------------------------------------------------------------------- verify
 
 
 def cmd_verify(a):
+    rep = _verify_report(a)
+    f = rep["files"]
+    Path(a.out).write_text(json.dumps(rep, indent=1, default=str))
+    print(json.dumps({"ok": rep["ok"], "failed_checks": rep["failed_checks"],
+                      "files": {k: (x if not isinstance(x, list) or len(x) < 20 else f"{len(x)} items")
+                                for k, x in f.items()},
+                      "dates": rep["dates"], "values": rep["values"], "api": rep["api"]}, indent=1, default=str))
+    return result_exit(rep)
+
+
+def _verify_report(a) -> dict:
     import numpy as np
     import pandas as pd
     import zarr
@@ -408,6 +471,13 @@ def cmd_verify(a):
     data_changed = sorted(f for f in set(changed) - allowed_changed if not is_metadata_file(f))
     meta_files = sorted(f for f in set(added) | set(changed) if is_metadata_file(f))
     meta_diff = _metadata_diff(a.before_store, a.store, meta_files) if a.before_store else None
+    # the month count before this append, from the pre-append metadata (not from
+    # the store under test, which would make "n == n_old + 1" a tautology)
+    n_before = None
+    if a.before_store:
+        zm0 = json.loads((Path(a.before_store) / ".zmetadata").read_text())["metadata"]
+        n_before = zm0.get(f"{GROUP}/date/.zarray", {}).get("shape", [None])[0]
+    rep["n_before"], rep["before_store_given"] = n_before, bool(a.before_store)
     rep["files"] = {
         "before": len(before), "after": len(after), "added": len(added), "removed": removed,
         "changed": changed, "unexpected_data_added": data_added, "unexpected_data_changed": data_changed,
@@ -476,23 +546,35 @@ def cmd_verify(a):
     rep["api"] = {"ok": True, "skipped": True} if a.no_api else \
         _api_check(a.api, a.store, [*(a.earlier_fixtures or []), a.fixtures])
 
-    f = rep["files"]
-    v = rep["values"]
-    ok = (not f["removed"] and not f["unexplained"]
-          and rep["dates"]["n"] == n_old + 1 and rep["dates"]["last"] == meta["new_month"]
-          and rep["dates"]["prev"] == meta["last_month_in_store"] and rep["dates"]["monotonic_unique"]
-          and rep["dates"]["consecutive_months"] and rep["lat_lon_files_unchanged"]
-          and all(x["nan_pattern_equal"] and x["within_tol"] for m in rep["earlier_months"].values() for x in m.values())
-          and all(x["nan_pattern_equal"] and x["within_tol"] and x["prev_month_unchanged"] for x in v.values())
-          and rep["dtypes"] == {"sst": "float32", "sst_anomaly": "float64", "level": "int64", "td": "float64"}
-          and all(s[0] == n_old + 1 for s in rep["zarr_shapes"].values())
-          and all(s[0] == n_old + 1 for s in rep["consolidated_shapes"].values())
-          and rep["api"]["ok"])
-    rep["ok"] = bool(ok)
-    Path(a.out).write_text(json.dumps(rep, indent=1, default=str))
-    print(json.dumps({"ok": rep["ok"], "files": {k: (x if not isinstance(x, list) or len(x) < 20 else f"{len(x)} items")
-                                                  for k, x in f.items()},
-                      "dates": rep["dates"], "values": v, "api": rep["api"]}, indent=1, default=str))
+    return with_checks(rep, verify_checks(rep, meta, n_before))
+
+
+DTYPES = {"sst": "float32", "sst_anomaly": "float64", "level": "int64", "td": "float64"}
+
+
+def verify_checks(rep: dict, meta: dict, n_before: int | None) -> dict:
+    """Named checks of a ``verify`` report (pure, for the tests).  n_before is the
+    month count of the pre-append metadata (None: no --before-store given)."""
+    f, v, d = rep["files"], rep["values"], rep["dates"]
+    n = d["n"]
+    c = {"files_none_removed": not f["removed"],
+         "files_all_explained": not f["unexplained"],
+         "dates_last_is_fixture_month": d["last"] == meta["new_month"],
+         "dates_prev_is_fixture_base": d["prev"] == meta["last_month_in_store"],
+         "dates_monotonic_unique": d["monotonic_unique"],
+         "dates_consecutive_months": d["consecutive_months"],
+         "lat_lon_files_unchanged": rep["lat_lon_files_unchanged"],
+         "earlier_months_unchanged": all(x["nan_pattern_equal"] and x["within_tol"]
+                                         for m in rep["earlier_months"].values() for x in m.values()),
+         "new_month_values": all(x["nan_pattern_equal"] and x["within_tol"] for x in v.values()),
+         "prev_month_unchanged": all(x["prev_month_unchanged"] for x in v.values()),
+         "dtypes": rep["dtypes"] == DTYPES,
+         "zarr_shapes": all(s[0] == n for s in rep["zarr_shapes"].values()),
+         "consolidated_shapes": all(s[0] == n for s in rep["consolidated_shapes"].values()),
+         "api": rep["api"].get("ok") is True}
+    if rep.get("before_store_given"):  # its date shape must exist and be one less
+        c["date_count_is_before_plus_one"] = n_before is not None and n == n_before + 1
+    return c
 
 
 def _metadata_diff(before_store, store, files):
@@ -658,8 +740,36 @@ def cmd_api_check(a):
     res = _api_check(a.api, a.store, [*(a.earlier_fixtures or []), a.fixtures])
     res["zarr"] = zarr.__version__
     Path(a.out).write_text(json.dumps(res, indent=1, default=str))
-    print(json.dumps({"ok": res["ok"], "zarr": res["zarr"], "plot": res["plot"],
-                      "cases": [(c["status"], c.get("match")) for c in res["cases"]]}))
+    print(json.dumps({"ok": res["ok"], "failed_checks": res["failed_checks"], "zarr": res["zarr"],
+                      "plot": res["plot"], "cases": [(c["status"], c.get("match")) for c in res["cases"]]}))
+    return result_exit(res)
+
+
+def cmd_check_result(a):
+    """Exit 0 only when the JSON result is as expected: --expect ok needs ok == true;
+    --expect fail needs ok == false and every --expect-failed name among the failed
+    checks (a negative control must fail, and for the reason it was built for)."""
+    verdict = {"file": a.file, "expect": a.expect, "expect_failed": a.expect_failed or []}
+    try:
+        doc = json.loads(Path(a.file).read_text())
+    except (OSError, ValueError) as exc:
+        verdict.update(as_expected=False, reason=f"unreadable: {type(exc).__name__}")
+        print(json.dumps(verdict))
+        return EXIT_UNEXPECTED
+    ok = doc.get("ok") if isinstance(doc, dict) else None
+    failed = doc.get("failed_checks") if isinstance(doc, dict) else None
+    verdict.update(ok=ok, failed_checks=failed)
+    if not isinstance(ok, bool):
+        verdict.update(as_expected=False, reason="no boolean 'ok'")
+    elif a.expect == "ok":
+        verdict.update(as_expected=ok is True, reason="ok" if ok else "ok is false")
+    else:
+        missing = [n for n in (a.expect_failed or []) if not (isinstance(failed, list) and n in failed)]
+        verdict.update(as_expected=ok is False and not missing,
+                       reason="ok is true" if ok else (f"not among failed_checks: {missing}" if missing
+                                                        else "failed as expected"))
+    print(json.dumps(verdict))
+    return EXIT_OK if verdict["as_expected"] else EXIT_UNEXPECTED
 
 
 def _api_check(api_dir, store, fixture_dirs):
@@ -692,12 +802,11 @@ def _api_check(api_dir, store, fixture_dirs):
                                "png": pr.content[:8] == b"\x89PNG\r\n\x1a\n"}
         finally:
             os.chdir(old)
-    res["ok"] = (all(c["status"] == 200 and c.get("match") for c in res["cases"])
-                 and res["plot"]["status"] == 200 and res["plot"]["png"])
-    return res
+    return with_checks(res, {"points": all(c["status"] == 200 and c.get("match") is True for c in res["cases"]),
+                             "plot": res["plot"]["status"] == 200 and res["plot"]["png"]})
 
 
-def main():
+def main(argv=None) -> int:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("fixtures"); s.add_argument("--store", required=True); s.add_argument("--out", required=True)
@@ -720,10 +829,15 @@ def main():
     s.add_argument("--earlier-fixtures", action="append")
     s = sub.add_parser("expect-points"); s.add_argument("--fixtures", action="append", required=True)
     s.add_argument("--out", required=True)
-    a = p.parse_args()
-    {"fixtures": cmd_fixtures, "snapshot": cmd_snapshot, "meta-copy": cmd_meta_copy, "diff": cmd_diff,
-     "run": cmd_run, "verify": cmd_verify, "api-check": cmd_api_check, "expect-points": cmd_expect_points}[a.cmd](a)
+    s = sub.add_parser("check-result"); s.add_argument("--file", required=True)
+    s.add_argument("--expect", choices=("ok", "fail"), required=True)
+    s.add_argument("--expect-failed", action="append", help="with --expect fail: a check that must have failed")
+    a = p.parse_args(argv)
+    rc = {"fixtures": cmd_fixtures, "snapshot": cmd_snapshot, "meta-copy": cmd_meta_copy, "diff": cmd_diff,
+          "run": cmd_run, "verify": cmd_verify, "api-check": cmd_api_check, "expect-points": cmd_expect_points,
+          "check-result": cmd_check_result}[a.cmd](a)
+    return EXIT_OK if rc is None else rc
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
