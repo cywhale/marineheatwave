@@ -231,39 +231,29 @@ def cmd_verify(a):
     date_chunk = ds["date"].encoding.get("chunks", (501,))[0]
     data_chunk = ds["sst"].encoding["chunks"][0]
     new_ci = n_old // data_chunk
-    allowed_added = {f"{GROUP}/{v}/{new_ci}.{i}.{j}" for v in VARS for i in range(4) for j in range(4)}
-    allowed_changed = ({f"{GROUP}/{v}/.zarray" for v in (*VARS, "date")} | {".zmetadata", f"{GROUP}/date/{n_old // date_chunk}"}
-                       | {f"{GROUP}/{v}/{new_ci}.{i}.{j}" for v in VARS for i in range(4) for j in range(4)})
-    unexpected_added = sorted(set(added) - allowed_added)
-    unexpected_changed = sorted(set(changed) - allowed_changed)
-    meta_diff = _metadata_diff(a.before_store, a.store, unexpected_changed + unexpected_added + [".zmetadata"]) \
-        if a.before_store else None
+    new_chunks = {f"{GROUP}/{v}/{new_ci}.{i}.{j}" for v in VARS for i in range(4) for j in range(4)}
+    date_file = f"{GROUP}/date/{n_old // date_chunk}"  # added when the new date starts a chunk, else changed
+    allowed_added = new_chunks | {date_file}
+    allowed_changed = new_chunks | {date_file}
+    data_added = sorted(f for f in set(added) - allowed_added if not is_metadata_file(f))
+    data_changed = sorted(f for f in set(changed) - allowed_changed if not is_metadata_file(f))
+    meta_files = sorted(f for f in set(added) | set(changed) if is_metadata_file(f))
+    meta_diff = _metadata_diff(a.before_store, a.store, meta_files) if a.before_store else None
     rep["files"] = {
         "before": len(before), "after": len(after), "added": len(added), "removed": removed,
-        "changed": changed, "unexpected_added": unexpected_added,
-        "unexpected_changed": unexpected_changed,
+        "changed": changed, "unexpected_data_added": data_added, "unexpected_data_changed": data_changed,
+        "metadata_files": meta_files,
         "unchanged_preexisting": len(before) - len(changed) - len(removed),
         "metadata_diff": meta_diff,
     }
-    # metadata rewrites zarr 3 makes on a v2 store (doc 29 r3 §7): accepted only
-    # when they are formatting-only or in this list; anything else fails
-    known = {("+file", ".zattrs"),
-             ("anomaly/.zgroup@.zmetadata", "consolidated_metadata"),
-             ("anomaly/lat/.zarray@.zmetadata", "dimension_separator"),
-             ("anomaly/lon/.zarray@.zmetadata", "dimension_separator")}
-    unexplained = []
-    if meta_diff is None:
-        unexplained = unexpected_changed + unexpected_added
+    # every metadata document is checked against the explicit rules in
+    # metadata_problems(): only the appended arrays may change shape, and only
+    # by one along date; other changes must be formatting or in KNOWN_REWRITES
+    unexplained = data_added + data_changed
+    if a.before_store:
+        unexplained += metadata_problems(a.before_store, a.store, n_old)
     else:
-        for f in unexpected_changed + unexpected_added:
-            if f not in meta_diff["files"]:
-                unexplained.append(f)  # a data file
-            elif meta_diff["files"][f] not in ("format_only", "added_empty_attrs"):
-                unexplained.append(f)
-        for k, keys in meta_diff["zmetadata_semantic"].items():
-            for kk in keys:
-                if (k, kk) not in known and kk != "shape":
-                    unexplained.append(f".zmetadata:{k}:{kk}")
+        unexplained += [f"{f}: no pre-update store to compare metadata with" for f in meta_files]
     rep["files"]["unexplained"] = unexplained
 
     # structure
@@ -349,6 +339,85 @@ def _metadata_diff(before_store, store, files):
             out["files"][f] = "format_only" if j0 == j1 else sorted(
                 x for x in set(j0) | set(j1) if j0.get(x) != j1.get(x))
     return out
+
+
+METADATA_FILES = (".zarray", ".zattrs", ".zgroup", ".zmetadata")
+APPENDED = tuple(f"{GROUP}/{v}" for v in (*VARS, "date"))  # arrays update_mhw.py extends along date
+# metadata zarr 3 adds when it rewrites this v2 store (doc 29 r3 §7, V-b); each
+# rule: (where, document, key) -> predicate(value before, value after)
+KNOWN_REWRITES = {
+    ("zmetadata", f"{GROUP}/.zgroup", "consolidated_metadata"): lambda b, a: b is None and a is not None,
+    ("zmetadata", f"{GROUP}/lat/.zarray", "dimension_separator"): lambda b, a: b is None and a == ".",
+    ("zmetadata", f"{GROUP}/lon/.zarray", "dimension_separator"): lambda b, a: b is None and a == ".",
+}
+_MISSING = object()
+
+
+def is_metadata_file(path: str) -> bool:
+    return path.rsplit("/", 1)[-1] in METADATA_FILES
+
+
+def _doc_problems(where: str, name: str, j0: dict, j1: dict, n_old: int) -> list[str]:
+    """Problems of one metadata document (an on-disk file or a .zmetadata entry)."""
+    probs = []
+    if name.endswith("/.zarray"):
+        arr = name[: -len("/.zarray")]
+        s0, s1 = j0.get("shape"), j1.get("shape")
+        if arr in APPENDED:
+            want = [n_old + 1, *s0[1:]] if isinstance(s0, list) and s0 and s0[0] == n_old else None
+            if want is None:
+                probs.append(f"{where}:{name}: shape before {s0}, expected first dimension {n_old}")
+            elif s1 != want:
+                probs.append(f"{where}:{name}: shape {s0} -> {s1}, expected {want}")
+        elif s0 != s1:
+            probs.append(f"{where}:{name}: shape changed {s0} -> {s1} (not an appended array)")
+    for key in sorted(set(j0) | set(j1)):
+        if key == "shape" and name.endswith("/.zarray"):
+            continue
+        b, a = j0.get(key, _MISSING), j1.get(key, _MISSING)
+        if b == a:
+            continue
+        rule = KNOWN_REWRITES.get((where, name, key))
+        if rule is None or not rule(None if b is _MISSING else b, None if a is _MISSING else a):
+            probs.append(f"{where}:{name}: key {key!r} changed {'<absent>' if b is _MISSING else b!r} -> "
+                         f"{'<absent>' if a is _MISSING else a!r}")
+    return probs
+
+
+def metadata_problems(before_store, store, n_old: int) -> list[str]:
+    """Every metadata difference between the pre-update store and the updated copy
+    that is not explicitly expected.  Checks all .zmetadata entries and every
+    on-disk metadata file of either store, whether or not its bytes changed."""
+    b0, b1 = Path(before_store), Path(store)
+    probs: list[str] = []
+    z0 = json.loads((b0 / ".zmetadata").read_text())
+    z1 = json.loads((b1 / ".zmetadata").read_text())
+    if {k: v for k, v in z0.items() if k != "metadata"} != {k: v for k, v in z1.items() if k != "metadata"}:
+        probs.append(".zmetadata: top-level keys other than 'metadata' changed")
+    m0, m1 = z0["metadata"], z1["metadata"]
+    for k in sorted(set(m0) - set(m1)):
+        probs.append(f"zmetadata:{k}: entry removed")
+    for k in sorted(set(m1) - set(m0)):
+        if not (k == ".zattrs" and m1[k] == {}):
+            probs.append(f"zmetadata:{k}: entry added")
+    for k in sorted(set(m0) & set(m1)):
+        probs += _doc_problems("zmetadata", k, m0[k], m1[k], n_old)
+    for arr in APPENDED:  # also an appended array whose entry did not change at all
+        if f"{arr}/.zarray" not in m0:
+            probs.append(f"zmetadata:{arr}/.zarray: missing")
+    files0 = {str(p.relative_to(b0)) for p in b0.rglob(".z*") if p.is_file() and p.name != ".zmetadata"}
+    files1 = {str(p.relative_to(b1)) for p in b1.rglob(".z*") if p.is_file() and p.name != ".zmetadata"}
+    for f in sorted(files0 - files1):
+        probs.append(f"file:{f}: removed")
+    for f in sorted(files1 - files0):
+        if not (f == ".zattrs" and json.loads((b1 / f).read_text()) == {}):
+            probs.append(f"file:{f}: added")
+    for f in sorted(files0 & files1):
+        probs += _doc_problems("file", f, json.loads((b0 / f).read_text()), json.loads((b1 / f).read_text()), n_old)
+    for arr in APPENDED:
+        if f"{arr}/.zarray" not in files0:
+            probs.append(f"file:{arr}/.zarray: missing")
+    return probs
 
 
 def _expected(fix: Path):
