@@ -1,0 +1,16 @@
+# Sourced by conf/start_app.sh (API) and conf/run_update_mhw.sh (monthly updater):
+# both use ONE uv venv (owner 2026-11-25; doc 29 r5 D1).  Not deployed yet (V-d).
+#
+# MHW_VENV: location still to be confirmed by the owner (doc 29 r5 §6 item 2);
+# an explicit MHW_VENV in the environment wins.
+: "${MHW_VENV:=/home/odbadmin/venvs/mhw-p12}"
+export MHW_VENV
+# polars[rtcompat] installs the "compat" runtime; force it so a missing compat
+# runtime fails at import instead of falling back to the AVX2 build (doc 28 r4 §9.3)
+export POLARS_FORCE_PKG=compat
+# the API no longer uses the shared Dask scheduler (P1-1a): never inherit its settings
+unset DASK_SCHEDULER_ADDRESS DASK_TLS_CA_FILE DASK_TLS_CLIENT_CERT DASK_TLS_CLIENT_KEY
+if [ ! -x "$MHW_VENV/bin/python" ]; then
+  echo "p12_env.sh: no python in MHW_VENV=$MHW_VENV" >&2
+  exit 1
+fi

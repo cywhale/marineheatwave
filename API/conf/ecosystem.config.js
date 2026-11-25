@@ -1,30 +1,25 @@
+// PM2 app for the MHW API, P1-2 (doc 29 r5 D2).  Versioned for V-d; not deployed.
+// Only mhwapi: the shared Dask PM2 services are not managed here.
 module.exports = {
-  apps : [
-/*{
-    name: 'dask-scheduler',
-    script: 'dask-scheduler',
-    autorestart: true,
-    restart_delay: 5000,
-  },
-  {
-    name: 'dask-worker',
-    script: 'dask-worker tcp://localhost:8786',
-    autorestart: true,
-    restart_delay: 10000,
-  },*/
-  {
-    name: 'mhwapi',
-    script: './conf/start_app.sh',
-    args: '',
-    merge_logs: true,
-    autorestart: true,
-    log_file: "tmp/combined.outerr.log",
-    out_file: "tmp/out.log",
-    error_file: "tmp/err.log",
-    log_date_format : "YYYY-MM-DD HH:mm Z",
-    append_env_to_name: true,
-    watch: false,
-    max_memory_restart: '4G',
-    pre_stop: "ps -ef | grep -w 'mhw_app' | grep -v grep | awk '{print $2}' | xargs -r kill -9"
-  }],
+  apps: [
+    {
+      name: 'mhwapi',
+      cwd: '/home/odbadmin/proj/marineheatwave/API',
+      script: './conf/start_app.sh',
+      interpreter: 'none',       // the script's own #!/bin/bash; it execs gunicorn
+      args: '',
+      merge_logs: true,
+      autorestart: true,
+      log_file: 'tmp/combined.outerr.log',
+      out_file: 'tmp/out.log',
+      error_file: 'tmp/err.log',
+      log_date_format: 'YYYY-MM-DD HH:mm Z',
+      append_env_to_name: false,
+      watch: false,
+      max_memory_restart: '4G',
+      kill_timeout: 20000,       // ms: PM2's stop signal (default SIGINT) reaches the gunicorn master directly
+                                 // because start_app.sh execs; SIGKILL only after this timeout
+      // pre_stop removed (doc 29 D2: not an effective PM2 setting; it was a kill -9 of every mhw_app process)
+    },
+  ],
 };

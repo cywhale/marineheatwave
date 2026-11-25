@@ -65,10 +65,14 @@ def test_shim_is_noop_and_does_not_import_distributed():
 
 def test_launcher_unsets_dask_env_and_no_longer_exports_it():
     sh = (API / "conf/start_app.sh").read_text()
-    assert "unset DASK_SCHEDULER_ADDRESS DASK_TLS_CA_FILE DASK_TLS_CLIENT_CERT DASK_TLS_CLIENT_KEY" in sh
+    env_sh = (API / "conf/p12_env.sh").read_text()
+    assert "unset DASK_SCHEDULER_ADDRESS DASK_TLS_CA_FILE DASK_TLS_CLIENT_CERT DASK_TLS_CLIENT_KEY" in env_sh
     assert "export DASK" not in sh and "tls_file" not in sh
-    # unchanged parts (P1-2 territory)
-    assert "-w 2 -k uvicorn.workers.UvicornWorker -b 127.0.0.1:8030" in sh and "--reload" in sh
+    # P1-2 (doc 29 r5 D2): the unset moved into conf/p12_env.sh, sourced by the launcher;
+    # exec, uvicorn-worker, no --reload (behaviour tested in tests/test_p1_2_launch_config.py)
+    env = (API / "conf/p12_env.sh").read_text()
+    assert "source conf/p12_env.sh" in sh and "export DASK" not in env
+    assert "-w 2 -k uvicorn_worker.UvicornWorker -b 127.0.0.1:8030" in sh and "--reload" not in sh
 
 
 # ----------------------------------------------------- unpatched app process
