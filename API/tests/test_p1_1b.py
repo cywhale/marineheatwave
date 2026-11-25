@@ -16,6 +16,7 @@ from pathlib import Path
 
 import polars as pl
 import pytest
+import starlette
 
 from src import responses
 from src.responses import TempFileResponse
@@ -26,6 +27,14 @@ C01 = MANIFEST["cases"]["C01"]
 C01_URL = C01["url"]
 C01_HEADERS = C01["headers"]  # content-type, content-disposition, accept-ranges, content-length
 SIZE = C01["size"]
+# Starlette 1.x writes the unit in a 416 Content-Range (RFC 9110: "bytes */<size>");
+# owner accepted this header change for P1-2 on 2026-11-25 (doc 29).  The body and
+# every other response stay as recorded in golden.
+STARLETTE_1 = int(starlette.__version__.split(".")[0]) >= 1
+
+
+def unsatisfiable_range(size):
+    return f"bytes */{size}" if STARLETTE_1 else f"*/{size}"
 
 
 @pytest.fixture()
@@ -66,7 +75,7 @@ def test_206_range_0_9(client, tmpdir_only):
 def test_416_range_not_satisfiable(client, tmpdir_only):
     r = client.get(C01_URL, headers={"Range": "bytes=999999999-"})
     assert r.status_code == 416
-    assert r.headers["content-range"] == f"*/{SIZE}"
+    assert r.headers["content-range"] == unsatisfiable_range(SIZE)
 
 
 def test_400_malformed_range(client, tmpdir_only):
@@ -108,8 +117,44 @@ def _scope(range_header=None, method="GET"):
     return {"type": "http", "method": method, "path": "/", "headers": headers}
 
 
-async def _receive():
-    return {"type": "http.request", "body": b"", "more_body": False}
+class _Client:
+    """ASGI client double that behaves like a real server's connection.
+
+    ``receive()`` does not return at once (the request has no body to deliver):
+    it waits until the response is complete (last body chunk sent) or sending
+    failed, then reports ``http.disconnect``.  Starlette 1.x FileResponse listens
+    for the disconnect while streaming (ASGI < 2.4); a receive that always
+    answered ``http.request`` at once made it busy-loop forever.  Older
+    Starlette never calls receive here, which is fine too.
+    """
+
+    def __init__(self, on_send=None):
+        self.on_send = on_send
+        self.sent: list[dict] = []
+        self.done = asyncio.Event()
+
+    async def receive(self):
+        await self.done.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(self, msg):
+        self.sent.append(msg)
+        try:
+            if self.on_send is not None:
+                await self.on_send(msg)
+        except BaseException:
+            self.done.set()
+            raise
+        if msg["type"] == "http.response.body" and not msg.get("more_body", False):
+            self.done.set()
+
+
+def _run(resp, scope, on_send=None):
+    async def go():
+        c = _Client(on_send)
+        await resp(scope, c.receive, c.send)
+        return c
+    return asyncio.run(go())
 
 
 def _make_file(d: Path, data: bytes = b"0123456789abcdef") -> str:
@@ -137,7 +182,7 @@ def test_send_error_during_body_removes_file_and_keeps_error(tmpdir_only, range_
 
     resp = TempFileResponse(path, media_type="text/csv", filename="x.csv")
     with pytest.raises(BodySendError) as ei:
-        asyncio.run(resp(_scope(range_header), _receive, send))
+        _run(resp, _scope(range_header), send)
     assert ei.value is err  # the original exception object, not replaced by cleanup
     assert sent == ["http.response.start", "http.response.body"]
     assert resp.background is None
@@ -151,8 +196,26 @@ def test_direct_call_removes_file_on_success(tmpdir_only):
         if msg["type"] == "http.response.body":
             body.append(msg.get("body", b""))
 
-    asyncio.run(TempFileResponse(path)(_scope(), _receive, send))
+    _run(TempFileResponse(path), _scope(), send)
     assert b"".join(body) == b"0123456789abcdef"
+
+
+def test_direct_call_206_removes_file(tmpdir_only):
+    path = _make_file(tmpdir_only)
+    c = _run(TempFileResponse(path, media_type="text/csv"), _scope("bytes=0-9"))
+    start = c.sent[0]
+    assert start["status"] == 206
+    assert b"".join(m.get("body", b"") for m in c.sent if m["type"] == "http.response.body") == b"0123456789"
+
+
+def test_direct_call_416_removes_file_with_starlette_header(tmpdir_only):
+    path = _make_file(tmpdir_only)  # 16 bytes
+    c = _run(TempFileResponse(path, media_type="text/csv"), _scope("bytes=999-"))
+    start = c.sent[0]
+    assert start["status"] == 416
+    headers = {k.decode().lower(): v.decode() for k, v in start["headers"]}
+    assert headers["content-range"] == unsatisfiable_range(16)
+    # tmpdir_only asserts that the file is gone
 
 
 # ---------------------------------------------------------- cleanup error policy
@@ -162,11 +225,8 @@ def test_missing_file_is_ignored_and_original_error_kept(tmpdir_only):
     path = _make_file(tmpdir_only)
     os.unlink(path)  # already gone before the response runs
 
-    async def send(msg):
-        pass
-
     with pytest.raises(RuntimeError, match="does not exist"):  # starlette's own error, not FileNotFoundError
-        asyncio.run(TempFileResponse(path)(_scope(), _receive, send))
+        _run(TempFileResponse(path), _scope())
 
 
 def test_cleanup_error_after_success_is_raised(tmpdir_only, monkeypatch):
@@ -178,12 +238,9 @@ def test_cleanup_error_after_success_is_raised(tmpdir_only, monkeypatch):
 
     monkeypatch.setattr(responses.os, "unlink", deny)
 
-    async def send(msg):
-        pass
-
     try:
         with pytest.raises(PermissionError):
-            asyncio.run(TempFileResponse(path)(_scope(), _receive, send))
+            _run(TempFileResponse(path), _scope())
     finally:
         real_unlink(path)
 
@@ -201,7 +258,7 @@ def test_cleanup_error_during_send_error_is_logged_not_replacing(tmpdir_only, mo
     try:
         with caplog.at_level(logging.ERROR, logger="src.responses"):
             with pytest.raises(BodySendError) as ei:
-                asyncio.run(TempFileResponse(path)(_scope(), _receive, send))
+                _run(TempFileResponse(path), _scope(), send)
         assert ei.value is err
         assert any("could not remove temporary file" in r.getMessage() for r in caplog.records)
         assert any(isinstance(r.exc_info[1], PermissionError) for r in caplog.records if r.exc_info)

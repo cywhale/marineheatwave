@@ -6,7 +6,15 @@ that the owner has not listed in ``approved_unstable`` all FAIL; nothing is
 skipped or xfailed.  A mismatching body is written to
 $MHW_GOLDEN_DIR/_actual/<case>.<ext> for diffing.  Never edit the manifest to
 make a test pass.
+
+PNG cases (P01-P06): status, headers, the PNG signature and the image size are
+checked, but not the bytes -- PNG output differs between matplotlib versions
+and is not part of the acceptance (owner decision 2026-11-25, doc 29); the data
+behind the plots is checked by tests/test_p1_1d.py.  JSON / CSV / error cases
+stay byte-compared.
 """
+import struct
+
 import pytest
 
 from tests.golden.cases import CASES
@@ -45,6 +53,11 @@ def test_golden(client, case):
     assert header_problems(case, res) == []
     assert res["status"] == golden["status"]
     assert res["headers"] == golden["headers"]
+    if case["kind"] == "png":
+        assert res["body"][:8] == b"\x89PNG\r\n\x1a\n", f"{case['id']} is not a PNG"
+        size = struct.unpack(">II", res["body"][16:24])
+        assert size == (golden["summary"]["width"], golden["summary"]["height"]), size
+        return
     if res["sha256"] != golden["sha256"]:
         out = GOLDEN_ROOT / "_actual"
         out.mkdir(parents=True, exist_ok=True)

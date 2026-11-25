@@ -10,6 +10,7 @@ compared with the serial golden manifest.
 import ast
 import asyncio
 import hashlib
+import struct
 import inspect
 import json
 import threading
@@ -30,12 +31,23 @@ def url(cid):
     return CASES[cid]["url"]
 
 
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
 def assert_golden(cid, r):
+    """Data cases (JSON / CSV / errors): body byte-identical to golden.  PNG cases:
+    status, headers, PNG signature and image size only -- PNG bytes are not compared
+    across matplotlib versions (owner decision 2026-11-25, doc 29); the data behind
+    the plots is covered by tests/test_p1_1d.py."""
     c = CASES[cid]
     assert r.status_code == c["status"], (cid, r.status_code)
-    assert hashlib.sha256(r.content).hexdigest() == c["sha256"], cid
     for k, v in c["headers"].items():
         assert r.headers.get(k) == v, (cid, k)
+    if c["headers"].get("content-type") == "image/png":
+        assert r.content[:8] == PNG_SIGNATURE, cid
+        assert struct.unpack(">II", r.content[16:24]) == (c["summary"]["width"], c["summary"]["height"]), cid
+    else:
+        assert hashlib.sha256(r.content).hexdigest() == c["sha256"], cid
 
 
 def wait_until(cond, timeout=WAIT, what="condition"):
@@ -129,12 +141,13 @@ def test_select_reads_no_data_and_matches_process(client):
     from polars.testing import assert_frame_equal
 
     from src.mhw_utils import finish_mhw_data, process_mhw_data, select_mhw_data
-    from tests.test_p1_1a import COORDS, chunk_reads
+    from tests.test_p1_1a import COORDS
+    from tests.zarr_spy import chunk_reads, data_var_keys
 
     kw = dict(lon0=-5, lat0=-5, lon1=5, lat1=5, start=date(2020, 1, 1), end=date(2021, 12, 1), append="sst")
     with chunk_reads() as keys:
         sel = select_mhw_data(**kw)
-    assert [k for k in keys if k.split("/")[1] not in COORDS] == []
+    assert data_var_keys(keys, COORDS) == []
     assert len(sel.parts) == 2 and sel.nbytes == sum(p.nbytes for p in sel.parts) > 0
     a, b = finish_mhw_data(sel), process_mhw_data(**kw)
     assert a[0] == b[0]
@@ -161,40 +174,33 @@ def test_run_guarded_releases_on_error_and_counts_once(guard_cfg):
 @pytest.mark.parametrize("cid", ["J07", "J09", "C03", "J08"])
 def test_slot_taken_before_any_data_read(client, guard_cfg, cid):
     """J07/C03/J08 go through xr.concat (reads both parts at once); J09 is one bbox."""
-    from tests.test_p1_1a import COORDS, chunk_reads
+    from tests.test_p1_1a import COORDS
+    from tests.zarr_spy import chunk_reads, data_var_keys
 
     guard_cfg(slots=1, heavy_bytes=1)
     at_acquire = []
     with chunk_reads() as keys:
-        G.hook = lambda ev, t: at_acquire.append([k for k in keys if k.split("/")[1] not in COORDS]) \
-            if ev == "acquired" else None
+        G.hook = lambda ev, t: at_acquire.append(data_var_keys(list(keys), COORDS)) if ev == "acquired" else None
         r = client.get(url(cid))
     assert_golden(cid, r)
     assert len(at_acquire) == 1, "exactly one acquire per request"
     assert at_acquire[0] == [], f"data read before the slot: {at_acquire[0][:5]}"
-    assert any(k.split("/")[1] not in COORDS for k in keys)  # data was read afterwards
+    assert data_var_keys(keys, COORDS), "the spy saw no data read at all"  # data was read afterwards
 
 
 def test_no_data_read_while_plot_lock_held(client, guard_cfg):
-    import zarr.storage
+    """Requests run one at a time here, so "the plot lock is held" is exactly
+    G.PLOT_LOCK.locked() -- valid whichever thread performs the read (zarr 3
+    reads on its own IO thread, so a thread-local check would be vacuous)."""
+    from tests.zarr_spy import chunk_reads, data_keys
 
     guard_cfg()
-    under_lock, reads = [], []
-    real = zarr.storage.DirectoryStore.__getitem__
-
-    def spy(self, key):
-        reads.append(key)
-        if getattr(G._local, "plot_lock_depth", 0):
-            under_lock.append(key)
-        return real(self, key)
-
-    zarr.storage.DirectoryStore.__getitem__ = spy
-    try:
+    under_lock = []
+    with chunk_reads(on_read=lambda k: under_lock.append(k) if G.PLOT_LOCK.locked() else None) as reads:
         for cid in ("P03", "P01"):
             assert_golden(cid, client.get(url(cid)))
-    finally:
-        zarr.storage.DirectoryStore.__getitem__ = real
-    assert reads and under_lock == []
+    assert data_keys(reads), "the spy saw no data read"
+    assert data_keys(under_lock) == [], under_lock[:5]
 
 
 def test_plot_takes_slot_first_and_lock_after_data(client, guard_cfg):

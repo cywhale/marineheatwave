@@ -16,7 +16,6 @@ import os
 import subprocess
 import sys
 import textwrap
-from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -102,23 +101,15 @@ from dask.base import is_dask_collection
 
 urls = json.loads(sys.argv[2])
 statuses = {}
-import zarr.storage
-inspect_reads = []
-_orig_getitem = zarr.storage.DirectoryStore.__getitem__
-def _spy(self, key):
-    inspect_reads.append(key)
-    return _orig_getitem(self, key)
+from tests.zarr_spy import chunk_reads  # zarr 2 DirectoryStore or zarr 3 LocalStore
 
 with TestClient(mhw_app.app) as c:
     # Type checks only: never touch .data / .values, which would materialise a
     # whole global variable (sst 2.2 GB, f8 vars 4.5 GB) on this lazy path.
-    zarr.storage.DirectoryStore.__getitem__ = _spy
-    try:
+    with chunk_reads() as inspect_reads:
         lazy = {k: type(config.dz[k].variable._data).__name__ for k in config.dz.data_vars}
         dask_backed = [k for k in config.dz.data_vars if is_dask_collection(config.dz[k].variable._data)
                        or config.dz[k].chunks is not None]
-    finally:
-        zarr.storage.DirectoryStore.__getitem__ = _orig_getitem
     for u in urls:
         statuses[u] = c.get(u).status_code
 print(json.dumps({"calls": calls, "statuses": statuses, "dask_backed": dask_backed, "lazy": lazy,
@@ -173,34 +164,28 @@ def test_opened_dataset_has_no_dask_or_memory_cache(client):
 
 
 # ------------------------------------------------------------ disk-level reads
+# The spy lives in tests/zarr_spy.py (zarr 2 DirectoryStore and zarr 3 LocalStore);
+# metadata documents (.zarray, .zmetadata, zarr.json, ...) never count as a variable read.
+
+from tests.zarr_spy import ZARR_MAJOR, chunk_reads, data_keys  # noqa: E402
+from tests.zarr_spy import vars_read as _vars_read  # noqa: E402
 
 
-@contextmanager
-def chunk_reads():
-    """Record every key read from the zarr DirectoryStore (chunk data and metadata)."""
-    import zarr.storage
+def test_spy_records_a_small_slice_and_nothing_for_lazy_inspection(client):
+    """Self-check of the spy itself, so a silent spy cannot make the read
+    assertions below pass vacuously ."""
+    import src.config as config
 
-    keys: list[str] = []
-    orig = zarr.storage.DirectoryStore.__getitem__
+    with chunk_reads() as keys:
+        kinds = {k: type(config.dz[k].variable._data).__name__ for k in config.dz.data_vars}
+        _ = config.dz["sst"].chunks, config.dz["sst"].dtype, config.dz["sst"].shape
+    assert kinds and data_keys(keys) == [], data_keys(keys)[:5]  # lazy inspection reads no chunk
 
-    def spy(self, key):
-        keys.append(key)
-        return orig(self, key)
-
-    zarr.storage.DirectoryStore.__getitem__ = spy
-    try:
-        yield keys
-    finally:
-        zarr.storage.DirectoryStore.__getitem__ = orig
-
-
-def _vars_read(keys):
-    out = set()
-    for k in keys:
-        parts = k.split("/")
-        if len(parts) >= 3 and parts[0] == "anomaly" and not parts[-1].startswith("."):
-            out.add(parts[1])
-    return out
+    with chunk_reads() as keys:
+        v = config.dz["sst"].isel(date=0, lat=slice(400, 402), lon=slice(500, 502)).values
+    assert v.shape == (2, 2)
+    assert _vars_read(keys) - COORDS == {"sst"}, sorted(keys)[:10]
+    assert all(k.startswith("anomaly/sst/") for k in data_keys(keys) if "/sst/" in k)
 
 
 @pytest.mark.parametrize("url,expected", [
