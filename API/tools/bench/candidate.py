@@ -110,7 +110,8 @@ class Launcher:
     def _child(self):
         for s in _SIGS:
             signal.signal(s, signal.SIG_DFL)
-        if self.child_pause_before_id:
+        if self.child_pause_before_id:  # tests only (V8): announce the pause, then wait
+            pi.write_atomic(str(self.run_dir / ".test_child_paused"), f"{os.getpid()}\n")
             time.sleep(self.child_pause_before_id)
         me = self.table.read(os.getpid())
         if me is None or not (me.pgid == me.sid == me.pid):
@@ -212,7 +213,7 @@ class Monitor(threading.Thread):
         self.on_abort(self.abort)
 
     def tick(self) -> None:
-        res = pi.resolve(self.table.scan(), self.cid, self.recorded_list())
+        res = pi.scan_resolve(self.table, self.cid, self.recorded_list())
         self.record(res)
         rss = {}
         for p in self.workers(res):
@@ -226,8 +227,9 @@ class Monitor(threading.Thread):
         self.min_available_mb = avail if self.min_available_mb is None else min(self.min_available_mb, avail)
         self.samples.append({"t": time.time(), "worker_rss_mb": rss, "available_mb": avail,
                              "targets": len(res.targets), "state": res.state})
-        if res.undetermined:
-            self.undetermined_seen.append({"t": time.time(), "pids": sorted(res.undetermined)})
+        if res.state == "undetermined":
+            self.undetermined_seen.append({"t": time.time(), "pids": sorted(res.undetermined),
+                                           "unreadable": [u["pid"] for u in res.unreadable]})
         if top > self.abort_rss_mb:
             self.trigger_abort({"reason": "worker_rss", "worker_rss_mb": top, "limit_mb": self.abort_rss_mb})
         elif avail < self.abort_avail_mb:
@@ -372,7 +374,11 @@ def run_step(D: Path, step: str, port: int, *, observe_mb: float, abort_rss_mb: 
                 signal.signal(s, signal.SIG_IGN)  # cleanup must not be interrupted
         if timer:
             timer.cancel()
-        final = do_stop(term_wait)
+        try:
+            final = do_stop(term_wait)
+        except Exception as exc:  # the result is still written; nothing is reported clean
+            doc["stop_error"] = {"type": type(exc).__name__, "message": str(exc)}
+            codes.append(EXIT_UNDETERMINED)
         if monitor:
             monitor.halt()
         launcher.reap()
@@ -424,6 +430,39 @@ def run_step(D: Path, step: str, port: int, *, observe_mb: float, abort_rss_mb: 
 # ------------------------------------------------------------------------ recover
 
 
+def _recover_one(rd: Path, mode: str, table, app: str, entry: dict, signaller, term_wait, kill_wait, poll) -> list[int]:
+    codes: list[int] = []
+    if not (rd / pi.ID_NAME).exists():
+        # by construction gunicorn never ran here; list processes whose cwd is the app dir
+        snap = table.scan()
+        hits = [pid for pid in snap if (table.cwd(pid) and os.path.realpath(table.cwd(pid)) == app)]
+        entry["no_candidate_id"] = True
+        entry["cwd_matches"] = hits
+        entry["unreadable"] = list(table.bad)
+        entry["state"] = "undetermined" if hits or table.bad else "none"
+        return [EXIT_UNDETERMINED] if entry["state"] == "undetermined" else []
+    try:
+        cid, recorded = pi.read_state(str(rd), table.unit)
+    except (pi.FormatError, OSError) as exc:
+        entry["state"] = "format_error"
+        entry["error"] = str(exc)
+        return [EXIT_FORMAT]
+    if mode == "list":
+        res = pi.scan_resolve(table, cid, recorded)
+        entry.update(res.as_dict())
+        codes.append({"undetermined": EXIT_UNDETERMINED, "alive": EXIT_FAILED}.get(res.state, EXIT_OK))
+        if res.mismatch:
+            codes.append(EXIT_MISMATCH)
+    else:
+        sr = pi.stop_candidate(table, cid, lambda: recorded, term_wait=term_wait, kill_wait=kill_wait,
+                               poll=poll, port=None, signaller=signaller)
+        entry.update(sr.as_dict())
+        codes.append({"undetermined": EXIT_UNDETERMINED, "residual": EXIT_RESIDUAL}.get(sr.state, EXIT_OK))
+        if sr.mismatch:
+            codes.append(EXIT_MISMATCH)
+    return codes
+
+
 def recover(D: Path, mode: str, port: int | None, *, table=None, signaller=None,
             term_wait: float = 30.0, kill_wait: float = 5.0, poll: float = 0.2) -> int:
     """Identify (list) or stop (stop) the candidates of every step directory in D/run."""
@@ -437,37 +476,12 @@ def recover(D: Path, mode: str, port: int | None, *, table=None, signaller=None,
     for rd in dirs:
         entry: dict = {"run_dir": str(rd)}
         report.append(entry)
-        if not (rd / pi.ID_NAME).exists():
-            # by construction gunicorn never ran here; list processes whose cwd is the app dir
-            hits = [pid for pid in table.scan() if (table.cwd(pid) and os.path.realpath(table.cwd(pid)) == app)]
-            entry["no_candidate_id"] = True
-            entry["cwd_matches"] = hits
-            if hits:
-                entry["state"] = "undetermined"
-                codes.append(EXIT_UNDETERMINED)
-            else:
-                entry["state"] = "none"
-            continue
         try:
-            cid, recorded = pi.read_state(str(rd), table.unit)
-        except (pi.FormatError, OSError) as exc:
-            entry["state"] = "format_error"
-            entry["error"] = str(exc)
-            codes.append(EXIT_FORMAT)
-            continue
-        if mode == "list":
-            res = pi.resolve(table.scan(), cid, recorded)
-            entry.update(res.as_dict())
-            codes.append({"undetermined": EXIT_UNDETERMINED, "alive": EXIT_FAILED}.get(res.state, EXIT_OK))
-            if res.mismatch:
-                codes.append(EXIT_MISMATCH)
-        else:
-            sr = pi.stop_candidate(table, cid, lambda: recorded, term_wait=term_wait, kill_wait=kill_wait,
-                                   poll=poll, port=None, signaller=signaller)
-            entry.update(sr.as_dict())
-            codes.append({"undetermined": EXIT_UNDETERMINED, "residual": EXIT_RESIDUAL}.get(sr.state, EXIT_OK))
-            if sr.mismatch:
-                codes.append(EXIT_MISMATCH)
+            codes.extend(_recover_one(rd, mode, table, app, entry, signaller, term_wait, kill_wait, poll))
+        except Exception as exc:  # never report a step clean when it could not be checked
+            entry["state"] = "error"
+            entry["error"] = {"type": type(exc).__name__, "message": str(exc)}
+            codes.append(EXIT_UNDETERMINED)
     pf = pi.port_free(port) if port else None
     # a bound port only counts when no candidate is known to be alive (it is
     # expected then); same order as candidate_recover.sh

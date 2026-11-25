@@ -14,14 +14,22 @@
 # kill re-reads that PID's start first (bash has no pidfd, so a tiny window
 # between the check and the kill remains).
 #
+# A /proc entry of our uid that exists but cannot be read or parsed might be
+# a candidate process, so it makes the state undetermined too (no signal,
+# never reported clean).  Unreadable entries of other uids are not ours.
+#
 # Exit: 0 clean | 1 candidates alive (list) | 2 usage/format | 5 left after stop
 #       or port bound or port check failed | 6 undetermined | 7 recorded number
 #       now used by another process (nothing signalled for it).
 #
-# Test-only overrides (never set in real use): MHW_RECOVER_PROC (proc root),
-# MHW_RECOVER_KILL (kill command, called as: CMD -s SIG PID),
-# MHW_RECOVER_PORTCHECK (command called with PORT; prints listeners),
-# MHW_RECOVER_TERM_WAIT, MHW_RECOVER_KILL_WAIT, MHW_RECOVER_POLL (seconds).
+# Real use, with a clean environment:
+#   env -i PATH=/usr/bin:/bin bash candidate_recover.sh list|stop RUN_DIR PORT
+#
+# Test-only overrides, honoured only with MHW_RECOVER_TEST_MODE=1 (any of them
+# without it is refused): MHW_RECOVER_PROC (proc root), MHW_RECOVER_KILL (kill
+# command, called as: CMD -s SIG PID), MHW_RECOVER_PORTCHECK (command called
+# with PORT; prints listeners), MHW_RECOVER_TERM_WAIT, MHW_RECOVER_KILL_WAIT,
+# MHW_RECOVER_POLL (seconds).
 set -u -o pipefail
 
 MODE=${1:-}
@@ -35,6 +43,12 @@ POLL=${MHW_RECOVER_POLL:-1}
 NUM='^(0|[1-9][0-9]*)$'
 
 fail() { echo "$2"; exit "$1"; }
+
+if [ -n "${MHW_RECOVER_PROC+x}${MHW_RECOVER_KILL+x}${MHW_RECOVER_PORTCHECK+x}${MHW_RECOVER_TERM_WAIT+x}${MHW_RECOVER_KILL_WAIT+x}${MHW_RECOVER_POLL+x}" ]; then
+  [ "${MHW_RECOVER_TEST_MODE:-}" = 1 ] \
+    || fail 2 "REFUSED: MHW_RECOVER_* overrides are test-only; run with env -i (see header) or set MHW_RECOVER_TEST_MODE=1 in tests"
+  echo "TEST MODE: proc=$PROC kill=$KILL"
+fi
 
 case "$MODE" in list|stop) ;; *) fail 2 "usage: $0 list|stop RUN_DIR PORT" ;; esac
 [[ "$PORT" =~ $NUM ]] || fail 2 "FORMAT: port must be a number"
@@ -55,20 +69,30 @@ start_of() {
   return 0
 }
 
-# one line per live process: "S pid ppid pgid sid start"
+# an entry that exists but cannot be used: "B pid" when it is ours (blocks), else a warning
+bad() {
+  [ -d "$PROC/$1" ] || return 0  # vanished while being read: gone
+  if [ -O "$PROC/$1" ]; then
+    echo "B $1"; echo "warning: $2 for $1 (owned by us: undetermined)" >&2
+  else
+    echo "warning: $2 for $1 (another uid: not a candidate)" >&2
+  fi
+}
+
+# one line per live process: "S pid ppid pgid sid start"; "B pid" for unusable entries of ours
 snapshot() {
   local f p s rest
   for f in "$PROC"/[0-9]*/stat; do
     p=${f#"$PROC"/}; p=${p%/stat}
     [[ "$p" =~ $NUM ]] || continue
-    s=$(cat "$f" 2>/dev/null) || continue
-    [[ "$s" == "$p ("* ]] || { echo "warning: unparsable stat for $p" >&2; continue; }
+    s=$(cat "$f" 2>/dev/null) || { bad "$p" "unreadable stat"; continue; }
+    [[ "$s" == "$p ("* ]] || { bad "$p" "unparsable stat"; continue; }
     rest=${s##*) }
     set -- $rest
-    if [ $# -lt 20 ]; then echo "warning: short stat for $p" >&2; continue; fi
+    if [ $# -lt 20 ]; then bad "$p" "short stat"; continue; fi
     case "$1" in Z|X|x) continue ;; esac
     if ! [[ "$2" =~ $NUM && "$3" =~ $NUM && "$4" =~ $NUM && "${20}" =~ $NUM ]]; then
-      echo "warning: non-numeric stat for $p" >&2; continue
+      bad "$p" "non-numeric stat"; continue
     fi
     echo "S $p $2 $3 $4 ${20}"
   done
@@ -95,6 +119,8 @@ if [ ! -e "$RUN/candidate.id" ]; then
     [ "$(readlink "$f/cwd" 2>/dev/null)" = "$D/app/API" ] && hits="$hits ${f#"$PROC"/}"
   done
   if [ -n "$hits" ]; then fail 6 "UNDETERMINED: no candidate.id; processes with the candidate cwd:$hits (not signalled)"; fi
+  bads=$(snapshot 2>/dev/null | awk '$1=="B" {printf " %s", $2}') || fail 6 "UNDETERMINED: process table could not be read"
+  if [ -n "$bads" ]; then fail 6 "UNDETERMINED: no candidate.id; unreadable entries of our uid:$bads (not signalled)"; fi
   fail 0 "no candidate.id and no process with the candidate cwd: no candidate process"
 fi
 idtext=$(cat "$RUN/candidate.id") || fail 2 "FORMAT: cannot read candidate.id"
@@ -124,6 +150,7 @@ AWK='
 $1=="M" { G=$2; S=$3; MP=$4; MS=$5; num[G]=1; num[S]=1; ls[S]=ls[S] " " MS " "; nr++; rp[nr]=MP; rs[nr]=MS; next }
 $1=="R" { nr++; rp[nr]=$2; rs[nr]=$3; num[$5]=1; num[$6]=1
           if ($2==$6 || $2==$5) ls[$2]=ls[$2] " " $3 " "; next }
+$1=="B" { print "X", $2; next }
 $1=="S" { n++; P[n]=$2; PP[$2]=$3; PG[$2]=$4; SS[$2]=$5; ST[$2]=$6; alive[$2]=1; next }
 END {
   for (i=1; i<=nr; i++) { p=rp[i]; if ((p in alive) && ST[p]==rs[i]) { T[p]="recorded"; as[SS[p]]=1; ag[PG[p]]=1 } }
@@ -156,7 +183,7 @@ resolve_now() {
 }
 count() { printf '%s\n' "$RES" | awk -v t="$1" '$1==t {c++} END {print c+0}'; }
 state() {  # none | alive | undetermined
-  if [ "$(count U)" -gt 0 ]; then echo undetermined
+  if [ "$(count U)" -gt 0 ] || [ "$(count X)" -gt 0 ]; then echo undetermined
   elif [ "$(count T)" -gt 0 ]; then echo alive
   else echo none; fi
 }
@@ -166,6 +193,7 @@ show() {
     $1=="T" { print "candidate " $2 " start=" $3 " via=" $4 }
     $1=="F" { print "foreign   " $2 " start=" $3 " (recorded number reused; not signalled)" }
     $1=="U" { print "UNDETERMINED " $2 " start=" $3 " (not signalled)" }
+    $1=="X" { print "UNREADABLE " $2 " (our uid; cannot be checked; nothing signalled)" }
     $1=="MASTER" { print "master: " $2 }'
 }
 mismatch() { [ "$(count F)" -gt 0 ] || printf '%s\n' "$RES" | grep -qx 'MASTER reused'; }

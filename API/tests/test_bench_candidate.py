@@ -111,7 +111,7 @@ class FakeProc:
         portstub.chmod(0o755)
         env = {"PATH": os.environ["PATH"], "MHW_RECOVER_PROC": str(self.root), "MHW_RECOVER_KILL": str(stub),
                "MHW_RECOVER_PORTCHECK": str(portstub), "MHW_RECOVER_TERM_WAIT": "0",
-               "MHW_RECOVER_KILL_WAIT": "0", "MHW_RECOVER_POLL": "1"}
+               "MHW_RECOVER_KILL_WAIT": "0", "MHW_RECOVER_POLL": "1", "MHW_RECOVER_TEST_MODE": "1"}
         p = subprocess.run(["bash", str(SHELL), mode, str(self.run), "18031"], env=env, capture_output=True,
                            text=True, timeout=60)
         return p.returncode, p.stdout
@@ -361,6 +361,105 @@ def test_v16_no_candidate_id_lists_cwd_matches_without_signals(fp):
     assert fp.python("stop") == candidate.EXIT_UNDETERMINED
     fp.remove(300)
     assert fp.shell("list")[0] == 0 and fp.python("list") == 0
+
+
+# ------------------------------- round 14 #1: an incomplete scan is never clean
+
+
+@pytest.fixture()
+def unreadable(fp):
+    """Restore permissions so tmp_path cleanup works whatever the test did."""
+    changed = []
+    yield changed
+    for f in changed:
+        if f.exists():
+            f.chmod(0o644)
+
+
+@pytest.mark.parametrize("how", ["chmod000", "garbage", "short"])
+@pytest.mark.parametrize("mode", ["list", "stop"])
+def test_r14_unreadable_entry_of_ours_blocks_python_and_shell(fp, unreadable, how, mode):
+    base_tree(fp)
+    fp.set_master(100, 1000)
+    fp.set_pids([(101, 1001, 100, 100, 100)])
+    fp.add(103, 101, 100, 100, 1003)  # a leftover helper the scan cannot read
+    stat = fp.root / "103" / "stat"
+    if how == "chmod000":
+        stat.chmod(0o000)
+        unreadable.append(stat)
+    elif how == "garbage":
+        stat.write_text("garbage\n")
+    else:
+        stat.write_text("103 (x) S 101 100 100\n")
+    table = fp.table()
+    r = pi.scan_resolve(table, *pi.read_state(str(fp.run), pi.UNIT_LINUX))
+    assert r.state == "undetermined" and [u["pid"] for u in r.unreadable] == [103]
+    assert fp.python(mode) == candidate.EXIT_UNDETERMINED
+    rc, out = fp.shell(mode)
+    assert rc == 6 and "UNREADABLE 103" in out and "no candidate process" not in out, out
+    assert fp.kills() == []  # nothing signalled, also not the provable candidates
+
+
+def test_r14_unreadable_entry_without_candidate_id(fp, unreadable):
+    fp.add(103, 1, 103, 103, 1003)
+    stat = fp.root / "103" / "stat"
+    stat.chmod(0o000)
+    unreadable.append(stat)
+    assert fp.python("list") == candidate.EXIT_UNDETERMINED
+    rc, out = fp.shell("list")
+    assert rc == 6 and "unreadable" in out
+
+
+def test_r14_vanished_entry_is_gone_not_unreadable(fp):
+    base_tree(fp)
+    (fp.root / "777").mkdir()  # a pid directory whose stat is already gone
+    fp.set_master(100, 1000)
+    fp.set_pids([])
+    sets, r = py_sets(fp)
+    assert not r.unreadable and sets["candidate"] == {100, 101, 102}
+    assert fp.shell("list")[0] == 1
+
+
+def test_r14_signaller_does_not_signal_unreadable_process():
+    class T:
+        unit = pi.UNIT_LINUX
+
+        def read(self, pid):
+            raise PermissionError(13, "denied")
+
+    sent = []
+    sg = pi.Signaller(T(), kill=lambda pid, sig: sent.append(pid))
+    assert sg.send(pi.Proc(100, 1, 100, 100, 1000), signal.SIGTERM).startswith("unreadable")
+    assert sent == []
+
+
+def test_r14_final_stop_error_still_writes_result(live, monkeypatch):
+    real = pi.stop_candidate
+    calls = {"n": 0}
+
+    def flaky(*a, **kw):
+        calls["n"] += 1
+        raise OSError(5, "simulated /proc read failure")
+
+    monkeypatch.setattr(candidate.pi, "stop_candidate", flaky)
+    rc = run(live)
+    assert rc == candidate.EXIT_UNDETERMINED and calls["n"] >= 1
+    doc = result(live["D"])
+    assert doc["stop_error"]["message"].endswith("simulated /proc read failure")
+    assert "exit_check" not in doc  # never reported clean
+    monkeypatch.setattr(candidate.pi, "stop_candidate", real)
+    assert candidate.recover(live["D"], "stop", live["port"]) == candidate.EXIT_OK  # recovery still works
+    assert no_candidate_left(live["D"], live["port"])
+
+
+def test_r14_shell_refuses_overrides_without_test_mode(fp):
+    base_tree(fp)
+    fp.set_master(100, 1000)
+    fp.set_pids([])
+    env = {"PATH": os.environ["PATH"], "MHW_RECOVER_PROC": str(fp.root), "MHW_RECOVER_KILL": "/bin/echo"}
+    p = subprocess.run(["bash", str(SHELL), "stop", str(fp.run), "18031"], env=env, capture_output=True,
+                       text=True, timeout=30)
+    assert p.returncode == 2 and "REFUSED" in p.stdout
 
 
 # ------------------------------------------------------- V12 identity re-check
@@ -773,10 +872,14 @@ def test_v7_runner_killed_before_ready_then_recover(live):
 def test_v8_runner_killed_before_identity_written_never_execs(live):
     p = _driver(live, "pause_before_id")
     assert p.stdout.readline().strip() == "starting"
-    time.sleep(1.0)  # the child is paused before writing candidate.id
+    idf = live["D"] / "run" / "s" / "candidate.id"
+    marker = live["D"] / "run" / "s" / ".test_child_paused"
+    # synchronise on the child itself: it writes the marker when it enters the pause (Codex round 14 #2)
+    child = int(until(lambda: marker.exists() and marker.read_text().strip(), timeout=20))
+    assert not idf.exists()  # really before candidate.id
+    assert pi.platform_table().read(child) is not None
     p.kill()
     p.wait(10)
-    idf = live["D"] / "run" / "s" / "candidate.id"
     until(lambda: idf.exists(), timeout=10)  # written by the child itself after the pause
     cid = pi.parse_id(idf.read_text())
     table = pi.platform_table()

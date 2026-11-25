@@ -26,10 +26,21 @@ F  = "foreign": not in T, its sid/pgid equals a recorded number whose leader
      out again, so these processes are provably not ours.
 U  = "undetermined": not in T, sid/pgid equals a recorded number, not provably
      foreign.  Any U blocks every signal (state "undetermined").
+An incomplete scan is also "undetermined": a process entry owned by our uid
+that exists but cannot be read or parsed might be a candidate process, so no
+signal is sent and nothing is reported clean (Codex round 14 #1).  Unreadable
+entries owned by another uid cannot be ours (the candidate runs as us and we
+could not signal them anyway); they are listed, not blocking.
 
 Signals are sent one process at a time after re-checking its start; on Linux
-through a pidfd opened before the check, so a reused PID cannot be hit.  No
-killpg.
+through a pidfd opened before the check, so the signal reaches the process that
+passed the check.  No killpg.
+
+Limits (doc 24 r5): starttime has clock-tick resolution, so a PID reused within
+the same tick would carry the same start and could not be told apart; and a
+scan reads /proc entry by entry, not as one atomic snapshot, so the ppid links
+of one scan are not an atomic proof under heavy PID churn.  Both are
+low-probability limits, not guarantees.
 """
 from __future__ import annotations
 
@@ -57,6 +68,10 @@ _PIDS_LINE_RE = re.compile(rf"^{_NUM} {_NUM} {_NUM} {_NUM} {_NUM}$")
 
 class FormatError(ValueError):
     """A state file or /proc entry that does not match the expected format."""
+
+
+class Unreadable(Exception):
+    """A process entry that exists but cannot be read (not the same as gone)."""
 
 
 @dataclass(frozen=True)
@@ -98,30 +113,49 @@ class LinuxProcTable:
 
     def __init__(self, root: str = "/proc"):
         self.root = root
-        self.bad: list[str] = []  # stat entries that could not be parsed in the last scan
+        self.bad: list[dict] = []  # entries of our uid that exist but could not be read in the last scan
+        self.other_unreadable: list[int] = []  # unreadable entries owned by another uid (not blocking)
 
     def read(self, pid: int) -> Proc | None:
-        """The live, non-zombie process with this pid, or None."""
+        """The live, non-zombie process with this pid; None when it is gone.
+
+        Raises Unreadable when the entry exists but cannot be read, FormatError
+        when its stat cannot be parsed."""
+        path = f"{self.root}/{pid}/stat"
         try:
-            with open(f"{self.root}/{pid}/stat", encoding="utf-8", errors="surrogateescape") as f:
+            with open(path, encoding="utf-8", errors="surrogateescape") as f:
                 text = f.read()
         except (FileNotFoundError, ProcessLookupError, NotADirectoryError):
             return None
+        except OSError as exc:
+            if not os.path.isdir(f"{self.root}/{pid}"):
+                return None  # vanished while being read
+            raise Unreadable(f"{path}: {exc}") from None
         state, proc = parse_stat(pid, text)
         return None if state in ("Z", "X", "x") else proc
 
+    def owned_by_us(self, pid: int) -> bool:
+        try:
+            return os.stat(f"{self.root}/{pid}").st_uid == os.geteuid()
+        except OSError:
+            return True  # unknown owner: treat as possibly ours
+
     def scan(self) -> dict[int, Proc]:
         out: dict[int, Proc] = {}
-        self.bad = []
+        self.bad, self.other_unreadable = [], []
         for name in os.listdir(self.root):
             if not name.isdigit():
                 continue
+            pid = int(name)
             try:
-                p = self.read(int(name))
-            except FormatError as exc:
-                self.bad.append(str(exc))
-                continue
-            except OSError:
+                p = self.read(pid)
+            except (Unreadable, FormatError) as exc:
+                if not os.path.isdir(f"{self.root}/{pid}"):
+                    continue
+                if self.owned_by_us(pid):
+                    self.bad.append({"pid": pid, "error": str(exc)})
+                else:
+                    self.other_unreadable.append(pid)
                 continue
             if p is not None:
                 out[p.pid] = p
@@ -142,7 +176,8 @@ class DarwinProcTable:
     def __init__(self):
         import psutil  # local tests only
         self._psutil = psutil
-        self.bad: list[str] = []
+        self.bad: list[dict] = []
+        self.other_unreadable: list[int] = []
 
     def read(self, pid: int) -> Proc | None:
         ps = self._psutil
@@ -151,15 +186,33 @@ class DarwinProcTable:
             if p.status() == ps.STATUS_ZOMBIE:
                 return None
             return Proc(pid, p.ppid(), os.getpgid(pid), os.getsid(pid), round(p.create_time() * 1e6))
-        except (ps.NoSuchProcess, ps.ZombieProcess, ProcessLookupError):
+        except (ps.NoSuchProcess, ProcessLookupError):
             return None
-        except (ps.AccessDenied, PermissionError, OSError):
+        except ps.ZombieProcess:
             return None
+        except (ps.AccessDenied, OSError) as exc:
+            raise Unreadable(f"pid {pid}: {type(exc).__name__}: {exc}") from None
+
+    def owned_by_us(self, pid: int) -> bool:
+        try:
+            return self._psutil.Process(pid).uids().effective == os.geteuid()
+        except Exception:
+            return True
 
     def scan(self) -> dict[int, Proc]:
         out = {}
+        self.bad, self.other_unreadable = [], []
         for pid in self._psutil.pids():
-            p = self.read(pid)
+            try:
+                p = self.read(pid)
+            except Unreadable as exc:
+                if not self._psutil.pid_exists(pid):
+                    continue
+                if self.owned_by_us(pid):
+                    self.bad.append({"pid": pid, "error": str(exc)})
+                else:
+                    self.other_unreadable.append(pid)
+                continue
             if p is not None:
                 out[pid] = p
         return out
@@ -279,11 +332,12 @@ class Resolution:
     how: dict[int, str] = field(default_factory=dict)  # recorded | session | group | child
     foreign: dict[int, Proc] = field(default_factory=dict)
     undetermined: dict[int, Proc] = field(default_factory=dict)
+    unreadable: list[dict] = field(default_factory=list)  # entries of our uid the scan could not read
     master: str = "gone"  # alive | gone | reused
 
     @property
     def state(self) -> str:
-        if self.undetermined:
+        if self.undetermined or self.unreadable:
             return "undetermined"
         return "alive" if self.targets else "none"
 
@@ -299,11 +353,19 @@ class Resolution:
     def as_dict(self) -> dict:
         d = lambda m: {str(k): vars(v) | ({"how": self.how[k]} if k in self.how else {}) for k, v in sorted(m.items())}
         return {"state": self.state, "master": self.master, "mismatch": self.mismatch,
-                "targets": d(self.targets), "foreign": d(self.foreign), "undetermined": d(self.undetermined)}
+                "targets": d(self.targets), "foreign": d(self.foreign), "undetermined": d(self.undetermined),
+                "unreadable": self.unreadable}
 
 
-def resolve(snapshot: dict[int, Proc], cid: CandidateId, recorded: list[Proc]) -> Resolution:
-    res = Resolution()
+def scan_resolve(table, cid: CandidateId, recorded: list[Proc]) -> Resolution:
+    """Scan the whole table and resolve; an incomplete scan makes the result undetermined."""
+    snapshot = table.scan()
+    return resolve(snapshot, cid, recorded, unreadable=list(getattr(table, "bad", [])))
+
+
+def resolve(snapshot: dict[int, Proc], cid: CandidateId, recorded: list[Proc],
+            unreadable: list[dict] | None = None) -> Resolution:
+    res = Resolution(unreadable=list(unreadable or []))
     pairs = [(cid.master_pid, cid.master_start)] + [(r.pid, r.start) for r in recorded]
     cur = snapshot.get(cid.master_pid)
     res.master = "gone" if cur is None else ("alive" if cur.start == cid.master_start else "reused")
@@ -387,7 +449,7 @@ class Signaller:
         try:
             try:
                 cur = self.table.read(p.pid)
-            except FormatError as exc:
+            except (FormatError, Unreadable, OSError) as exc:
                 return self._record(p, sig, f"unreadable:{exc}")
             if cur is None:
                 return self._record(p, sig, "gone")
@@ -463,11 +525,12 @@ def stop_candidate(table, cid: CandidateId, recorded: Callable[[], list[Proc]], 
     def check() -> Resolution:
         if reap:
             reap()
-        r = resolve(table.scan(), cid, recorded() + list(proven.values()))
+        r = scan_resolve(table, cid, recorded() + list(proven.values()))
         for p in r.targets.values():
             proven[(p.pid, p.start)] = p
         rounds.append({"t": time.time(), "state": r.state, "targets": sorted(r.targets),
-                       "undetermined": sorted(r.undetermined), "foreign": sorted(r.foreign)})
+                       "undetermined": sorted(r.undetermined), "foreign": sorted(r.foreign),
+                       "unreadable": [u["pid"] for u in r.unreadable]})
         return r
 
     def wait_gone(limit: float) -> Resolution:
