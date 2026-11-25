@@ -33,27 +33,61 @@ def _cr(tmp_path, doc, *args):
     return uc.main(["check-result", "--file", str(f), *args])
 
 
+def _res(**checks):
+    """A result as with_checks() writes it."""
+    return uc.with_checks({}, checks)
+
+
+GOOD = _res(a=True, b=True)
+NEG = _res(dates_last_is_fixture_month=False, new_month_values=False, files_all_explained=True)
+
+
 @pytest.mark.parametrize("doc,expect,extra,rc", [
-    ({"ok": True}, "ok", [], 0),
-    ({"ok": False, "failed_checks": ["x"]}, "ok", [], uc.EXIT_UNEXPECTED),
-    ({"ok": "true"}, "ok", [], uc.EXIT_UNEXPECTED),                      # not a JSON boolean
-    ({"ok": 1}, "ok", [], uc.EXIT_UNEXPECTED),
+    (GOOD, "ok", [], 0),
+    (_res(a=True, b=False), "ok", [], uc.EXIT_UNEXPECTED),                # a failed check
+    ({"ok": True}, "ok", [], uc.EXIT_UNEXPECTED),                          # no checks / failed_checks
+    ({"ok": True, "checks": {"a": True}}, "ok", [], uc.EXIT_UNEXPECTED),   # no failed_checks
+    ({"ok": True, "failed_checks": []}, "ok", [], uc.EXIT_UNEXPECTED),     # no checks
+    ({"ok": True, "checks": {}, "failed_checks": []}, "ok", [], uc.EXIT_UNEXPECTED),          # empty checks
+    (dict(GOOD, ok="true"), "ok", [], uc.EXIT_UNEXPECTED),                 # not a JSON boolean
+    (dict(GOOD, ok=1), "ok", [], uc.EXIT_UNEXPECTED),
+    (dict(GOOD, checks={"a": 1, "b": True}), "ok", [], uc.EXIT_UNEXPECTED),                  # check not boolean
+    (dict(GOOD, checks=["a"]), "ok", [], uc.EXIT_UNEXPECTED),                                # checks not a dict
+    (dict(GOOD, failed_checks="none"), "ok", [], uc.EXIT_UNEXPECTED),                        # not a list
+    (dict(GOOD, failed_checks=[1]), "ok", [], uc.EXIT_UNEXPECTED),                           # not names
+    (dict(GOOD, checks={"a": True, "b": False}), "ok", [], uc.EXIT_UNEXPECTED),  # ok true, a check false
+    (dict(GOOD, failed_checks=["b"]), "ok", [], uc.EXIT_UNEXPECTED),       # failed_checks vs checks
+    ({"ok": True, "checks": {"a": False}, "failed_checks": ["a"]}, "ok", [], uc.EXIT_UNEXPECTED),  # ok vs both
     ({}, "ok", [], uc.EXIT_UNEXPECTED),
-    (None, "ok", [], uc.EXIT_UNEXPECTED),                                # missing file
-    ("{truncated", "ok", [], uc.EXIT_UNEXPECTED),                        # partial JSON
-    # negative control: must fail, and for the reason it was built for
-    ({"ok": False, "failed_checks": ["dates_last_is_fixture_month", "new_month_values"]}, "fail",
-     ["--expect-failed", "dates_last_is_fixture_month"], 0),
-    ({"ok": True, "failed_checks": []}, "fail", ["--expect-failed", "dates_last_is_fixture_month"],
-     uc.EXIT_UNEXPECTED),                                                # it passed: not as expected
-    ({"ok": False, "failed_checks": ["api"]}, "fail", ["--expect-failed", "dates_last_is_fixture_month"],
-     uc.EXIT_UNEXPECTED),                                                # failed for another reason
-    (None, "fail", [], uc.EXIT_UNEXPECTED),                              # crashed, no JSON
+    ([], "ok", [], uc.EXIT_UNEXPECTED),                                    # not an object
+    (None, "ok", [], uc.EXIT_UNEXPECTED),                                  # missing file
+    ("{truncated", "ok", [], uc.EXIT_UNEXPECTED),                          # partial JSON
+    # negative control: must fail, for the reason it was built for, with consistent fields
+    (NEG, "fail", ["--expect-failed", "dates_last_is_fixture_month"], 0),
+    (NEG, "fail", [], 0),
+    (GOOD, "fail", ["--expect-failed", "dates_last_is_fixture_month"], uc.EXIT_UNEXPECTED),  # it passed
+    (_res(api=False, x=True), "fail", ["--expect-failed", "dates_last_is_fixture_month"],
+     uc.EXIT_UNEXPECTED),                                                  # failed for another reason
+    ({"ok": False, "failed_checks": ["dates_last_is_fixture_month"]}, "fail",
+     ["--expect-failed", "dates_last_is_fixture_month"], uc.EXIT_UNEXPECTED),               # no checks
+    (dict(NEG, failed_checks=["dates_last_is_fixture_month"]), "fail",
+     ["--expect-failed", "dates_last_is_fixture_month"], uc.EXIT_UNEXPECTED),               # incomplete list
+    (dict(NEG, ok=True), "fail", ["--expect-failed", "dates_last_is_fixture_month"],
+     uc.EXIT_UNEXPECTED),                                                  # ok contradicts failures
+    ({"ok": False, "checks": {"a": True}, "failed_checks": []}, "fail", [], uc.EXIT_UNEXPECTED),  # ok false, nothing failed
+    (None, "fail", [], uc.EXIT_UNEXPECTED),                                # crashed, no JSON
 ])
 def test_check_result(tmp_path, capsys, doc, expect, extra, rc):
     assert _cr(tmp_path, doc, "--expect", expect, *extra) == rc
     verdict = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert verdict["as_expected"] is (rc == 0)
+
+
+def test_result_consistency_of_real_writers():
+    """Everything with_checks() writes is consistent, passing or failing."""
+    assert uc.result_consistency(GOOD) == [] and uc.result_consistency(NEG) == []
+    rep = _good_run_rep()
+    assert uc.result_consistency(uc.with_checks(rep, uc.run_checks(rep))) == []
 
 
 # --------------------------------------------------------------------- verify
@@ -69,7 +103,7 @@ def _good_verify_rep():
             "values": vals, "dtypes": dict(uc.DTYPES),
             "zarr_shapes": {v: [540, 720, 1440] for v in uc.VARS} | {"date": [540]},
             "consolidated_shapes": {v: [540, 720, 1440] for v in uc.VARS} | {"date": [540]},
-            "api": {"ok": True, "skipped": True}, "n_before": 539, "before_store_given": True}
+            "api": {"ok": True, "skipped": True}, "n_before": 539}
 
 
 META2 = {"new_month": "2026-12-01", "last_month_in_store": "2026-11-01"}
@@ -78,7 +112,8 @@ META2 = {"new_month": "2026-12-01", "last_month_in_store": "2026-11-01"}
 def test_verify_checks_all_pass_on_a_good_report():
     rep = _good_verify_rep()
     uc.with_checks(rep, uc.verify_checks(rep, META2, 539))
-    assert rep["ok"] is True and rep["failed_checks"] == [] and "date_count_is_before_plus_one" in rep["checks"]
+    assert rep["ok"] is True and rep["failed_checks"] == [] and rep["checks"]["date_count_is_before_plus_one"]
+    assert uc.result_consistency(rep) == []
 
 
 @pytest.mark.parametrize("mutate,failed", [
@@ -106,12 +141,28 @@ def test_verify_checks_each_failure_is_named(mutate, failed):
 
 def test_verify_date_count_needs_the_before_shape():
     rep = _good_verify_rep()
-    uc.with_checks(rep, uc.verify_checks(rep, META2, None))  # --before-store given, no date shape in it
+    uc.with_checks(rep, uc.verify_checks(rep, META2, None))  # --before-store has no date shape
     assert "date_count_is_before_plus_one" in rep["failed_checks"]
 
 
+def test_verify_requires_before_store(tmp_path, capsys):
+    """Codex r22 follow-up: no independent month-count baseline -> verify does not run."""
+    argv = ["verify", "--store", "s", "--fixtures", "f", "--before", "b", "--api", "a", "--out", str(tmp_path / "v.json")]
+    with pytest.raises(SystemExit) as e:
+        uc.main(argv)
+    assert e.value.code == uc.EXIT_USAGE and "--before-store" in capsys.readouterr().err
+    assert not (tmp_path / "v.json").exists()
+
+
+def test_every_verify_call_site_passes_before_store():
+    import re
+    text = CHAIN.read_text()
+    calls = re.findall(r"\$T verify .*?(?=\n\S|\n\s*rc=|$)", text, flags=re.S)
+    assert len(calls) == 2 and all("--before-store" in c for c in calls), calls
+
+
 def _verify_argv(tmp_path):
-    return ["verify", "--store", "s", "--fixtures", "f", "--before", "b", "--api", "a",
+    return ["verify", "--store", "s", "--fixtures", "f", "--before", "b", "--before-store", "m", "--api", "a",
             "--out", str(tmp_path / "v.json")]
 
 
@@ -308,12 +359,15 @@ if sub in ("meta-copy", "fixtures"):
     finish(label)
 if sub == "snapshot":
     finish(label, {{"a": ["sha", 1]}})
+GOOD = {{"ok": True, "checks": {{"a": True}}, "failed_checks": []}}
 if sub == "run":
-    finish(label, {{"ok": True, "failed_checks": [], "completed": True, "no_external_access": True}})
+    finish(label, GOOD)
 if sub == "verify":
     if label == "verify_negative_wrong_n":
-        finish(label, {{"ok": False, "failed_checks": ["dates_last_is_fixture_month", "new_month_values"]}}, 3)
-    finish(label, {{"ok": True, "failed_checks": []}})
+        finish(label, {{"ok": False, "checks": {{"dates_last_is_fixture_month": False, "new_month_values": False,
+                                                  "files_all_explained": True}},
+                        "failed_checks": ["dates_last_is_fixture_month", "new_month_values"]}}, 3)
+    finish(label, GOOD)
 finish(label, {{}})
 '''
 
@@ -358,10 +412,13 @@ def _failed(rc, steps, status, reason):
 
 
 @pytest.mark.parametrize("config,reason,last,diag", [
-    ({"verify1": {"rc": 3, "doc": {"ok": False, "failed_checks": ["new_month_values"]}}}, "verify1 rc=3", "verify1",
+    ({"verify1": {"rc": 3, "doc": _res(new_month_values=False)}}, "verify1 rc=3", "verify1",
      []),
     ({"verify1": {"rc": 0, "doc": {"ok": False}}}, "verify1: out/verify1.json is not ok=true", "verify1", []),
-    ({"run1": {"rc": 3, "doc": {"ok": False, "failed_checks": ["no_dotenv_open"]}}}, "run1 rc=3", "run1", []),
+    ({"run1": {"rc": 3, "doc": _res(no_dotenv_open=False)}}, "run1 rc=3", "run1", []),
+    # exit 0 and ok=true, but the status fields disagree: not accepted
+    ({"verify1": {"rc": 0, "doc": {"ok": True, "checks": {"a": False}, "failed_checks": []}}},
+     "verify1: out/verify1.json is not ok=true", "verify1", []),
     # after the first server step, diagnose lists the API dir already used
     ({"verify2": {"rc": 1, "doc": None}}, "verify2 rc=1", "verify2", ["recover1-list"]),   # crashed, no JSON
     ({"run2": {"rc": 0, "doc": {"ok": False}}}, "run2: out/run2.json is not ok=true", "run2", ["recover1-list"]),
@@ -401,10 +458,12 @@ def test_chain_copy_differs_fails(chain):
 
 
 @pytest.mark.parametrize("neg,reason", [
-    ({"rc": 0, "doc": {"ok": True, "failed_checks": []}}, "negative control: verify rc=0"),          # passed
+    ({"rc": 0, "doc": _res(a=True)}, "negative control: verify rc=0"),                                # passed
     ({"rc": 1, "doc": None}, "negative control: verify rc=1"),                                       # crashed
-    ({"rc": 3, "doc": {"ok": False, "failed_checks": ["api"]}}, "negative control: not the expected failure"),
-    ({"rc": 3, "doc": {"ok": True, "failed_checks": []}}, "negative control: not the expected failure"),
+    ({"rc": 3, "doc": _res(api=False)}, "negative control: not the expected failure"),
+    ({"rc": 3, "doc": _res(a=True)}, "negative control: not the expected failure"),
+    ({"rc": 3, "doc": {"ok": False, "failed_checks": ["dates_last_is_fixture_month"]}},
+     "negative control: not the expected failure"),                                                  # no checks
 ])
 def test_chain_negative_control_must_fail_as_built(chain, neg, reason):
     rc, steps, status, calls = chain({"verify_negative_wrong_n": neg})

@@ -470,14 +470,16 @@ def _verify_report(a) -> dict:
     data_added = sorted(f for f in set(added) - allowed_added if not is_metadata_file(f))
     data_changed = sorted(f for f in set(changed) - allowed_changed if not is_metadata_file(f))
     meta_files = sorted(f for f in set(added) | set(changed) if is_metadata_file(f))
-    meta_diff = _metadata_diff(a.before_store, a.store, meta_files) if a.before_store else None
+    meta_diff = _metadata_diff(a.before_store, a.store, meta_files)
     # the month count before this append, from the pre-append metadata (not from
-    # the store under test, which would make "n == n_old + 1" a tautology)
-    n_before = None
-    if a.before_store:
-        zm0 = json.loads((Path(a.before_store) / ".zmetadata").read_text())["metadata"]
-        n_before = zm0.get(f"{GROUP}/date/.zarray", {}).get("shape", [None])[0]
-    rep["n_before"], rep["before_store_given"] = n_before, bool(a.before_store)
+    # the store under test, which would make "n == n_old + 1" a tautology).
+    # --before-store is required (Codex r22 follow-up): without it there is no
+    # independent baseline, so verify cannot run at all.
+    zm0 = json.loads((Path(a.before_store) / ".zmetadata").read_text())["metadata"]
+    n_before = zm0.get(f"{GROUP}/date/.zarray", {}).get("shape", [None])[0]
+    rep["n_before"] = n_before
+    rep["not_verified"] = (["api: --no-api (the API is checked separately, e.g. append_server)"]
+                           if a.no_api else [])
     rep["files"] = {
         "before": len(before), "after": len(after), "added": len(added), "removed": removed,
         "changed": changed, "unexpected_data_added": data_added, "unexpected_data_changed": data_changed,
@@ -488,11 +490,7 @@ def _verify_report(a) -> dict:
     # every metadata document is checked against the explicit rules in
     # metadata_problems(): only the appended arrays may change shape, and only
     # by one along date; other changes must be formatting or in KNOWN_REWRITES
-    unexplained = data_added + data_changed
-    if a.before_store:
-        unexplained += metadata_problems(a.before_store, a.store, n_old)
-    else:
-        unexplained += [f"{f}: no pre-update store to compare metadata with" for f in meta_files]
+    unexplained = data_added + data_changed + metadata_problems(a.before_store, a.store, n_old)
     rep["files"]["unexplained"] = unexplained
 
     # structure
@@ -554,7 +552,8 @@ DTYPES = {"sst": "float32", "sst_anomaly": "float64", "level": "int64", "td": "f
 
 def verify_checks(rep: dict, meta: dict, n_before: int | None) -> dict:
     """Named checks of a ``verify`` report (pure, for the tests).  n_before is the
-    month count of the pre-append metadata (None: no --before-store given)."""
+    month count of the pre-append metadata (--before-store, required); None when
+    that metadata has no date shape, which fails date_count_is_before_plus_one."""
     f, v, d = rep["files"], rep["values"], rep["dates"]
     n = d["n"]
     c = {"files_none_removed": not f["removed"],
@@ -571,9 +570,9 @@ def verify_checks(rep: dict, meta: dict, n_before: int | None) -> dict:
          "dtypes": rep["dtypes"] == DTYPES,
          "zarr_shapes": all(s[0] == n for s in rep["zarr_shapes"].values()),
          "consolidated_shapes": all(s[0] == n for s in rep["consolidated_shapes"].values()),
-         "api": rep["api"].get("ok") is True}
-    if rep.get("before_store_given"):  # its date shape must exist and be one less
-        c["date_count_is_before_plus_one"] = n_before is not None and n == n_before + 1
+         "api": rep["api"].get("ok") is True,
+         # always present: the baseline is required, its date shape must exist and be one less
+         "date_count_is_before_plus_one": isinstance(n_before, int) and n == n_before + 1}
     return c
 
 
@@ -745,10 +744,43 @@ def cmd_api_check(a):
     return result_exit(res)
 
 
+def result_consistency(doc) -> list[str]:
+    """Problems with the status fields of a result written by with_checks():
+    ``ok`` a JSON boolean; ``checks`` a non-empty dict of name -> JSON boolean;
+    ``failed_checks`` a list of names equal to the sorted false checks; ok true
+    exactly when failed_checks is empty."""
+    if not isinstance(doc, dict):
+        return ["result is not a JSON object"]
+    probs = []
+    ok, checks, failed = doc.get("ok", _MISSING), doc.get("checks", _MISSING), doc.get("failed_checks", _MISSING)
+    if type(ok) is not bool:
+        probs.append("'ok' missing or not a boolean")
+    if checks is _MISSING or type(checks) is not dict:
+        probs.append("'checks' missing or not an object")
+        checks = None
+    elif not checks:
+        probs.append("'checks' is empty")
+    elif not all(isinstance(k, str) and type(v) is bool for k, v in checks.items()):
+        probs.append("'checks' has a non-boolean value")
+        checks = None
+    if failed is _MISSING or type(failed) is not list or not all(isinstance(x, str) for x in failed):
+        probs.append("'failed_checks' missing or not a list of names")
+        failed = None
+    if checks is not None and failed is not None and failed != sorted(k for k, v in checks.items() if not v):
+        probs.append("'failed_checks' does not match the false entries of 'checks'")
+    if type(ok) is bool and failed is not None and ok != (not failed):
+        probs.append("'ok' contradicts 'failed_checks'")
+    if type(ok) is bool and checks and ok != all(checks.values()):
+        probs.append("'ok' contradicts 'checks'")
+    return probs
+
+
 def cmd_check_result(a):
-    """Exit 0 only when the JSON result is as expected: --expect ok needs ok == true;
-    --expect fail needs ok == false and every --expect-failed name among the failed
-    checks (a negative control must fail, and for the reason it was built for)."""
+    """Exit 0 only when the JSON result is as expected and its status fields agree
+    (result_consistency).  --expect ok: ok true, every named check true,
+    failed_checks empty.  --expect fail: ok false, failed_checks non-empty, and
+    every --expect-failed name among them (a negative control must fail, and for
+    the reason it was built for)."""
     verdict = {"file": a.file, "expect": a.expect, "expect_failed": a.expect_failed or []}
     try:
         doc = json.loads(Path(a.file).read_text())
@@ -756,16 +788,18 @@ def cmd_check_result(a):
         verdict.update(as_expected=False, reason=f"unreadable: {type(exc).__name__}")
         print(json.dumps(verdict))
         return EXIT_UNEXPECTED
+    probs = result_consistency(doc)
     ok = doc.get("ok") if isinstance(doc, dict) else None
     failed = doc.get("failed_checks") if isinstance(doc, dict) else None
-    verdict.update(ok=ok, failed_checks=failed)
-    if not isinstance(ok, bool):
-        verdict.update(as_expected=False, reason="no boolean 'ok'")
+    verdict.update(ok=ok, failed_checks=failed, inconsistent=probs)
+    if probs:
+        verdict.update(as_expected=False, reason="inconsistent status fields")
     elif a.expect == "ok":
-        verdict.update(as_expected=ok is True, reason="ok" if ok else "ok is false")
+        verdict.update(as_expected=ok is True and failed == [],
+                       reason="ok" if ok else f"failed: {failed}")
     else:
-        missing = [n for n in (a.expect_failed or []) if not (isinstance(failed, list) and n in failed)]
-        verdict.update(as_expected=ok is False and not missing,
+        missing = [n for n in (a.expect_failed or []) if n not in failed]
+        verdict.update(as_expected=ok is False and bool(failed) and not missing,
                        reason="ok is true" if ok else (f"not among failed_checks: {missing}" if missing
                                                         else "failed as expected"))
     print(json.dumps(verdict))
@@ -820,7 +854,8 @@ def main(argv=None) -> int:
     s = sub.add_parser("verify")
     for k in ("--store", "--fixtures", "--before", "--api", "--out"):
         s.add_argument(k, required=True)
-    s.add_argument("--before-store", help="pre-update store or meta-copy, to check metadata changes")
+    s.add_argument("--before-store", required=True,
+                   help="pre-update store or meta-copy (required: the metadata rules and the month-count baseline)")
     s.add_argument("--earlier-fixtures", action="append", help="fixtures of months appended before (chained)")
     s.add_argument("--no-api", action="store_true", help="skip the in-process API check (no httpx here)")
     s = sub.add_parser("api-check")
