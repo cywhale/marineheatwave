@@ -7,7 +7,9 @@ environment, proven-identity stop, exit / port check) with an explicit argv:
         [--worker-class uvicorn_worker.UvicornWorker] [--workers 2]
 
 D/app/API must be (a link to) the API checkout whose data/mhw.zarr is the
-read-only copy.  Steps (each a fresh server; a step directory is never reused):
+read-only copy.  Readiness is the candidate runner's (HTTP probe + one "Application
+startup complete" per worker; r20).  Steps (each a fresh server; a step directory
+is never reused):
 
   asgi_echo  tools.p1_2.asgi_echo:app, -w 1: the scope the real worker sends
   golden     mhw_app:app, -w N: every golden case (JSON / CSV / errors byte-
@@ -38,12 +40,10 @@ API = Path(__file__).resolve().parents[2]
 
 
 def argv_for(app: str, a, D: Path, step: str, workers: int) -> list[str]:
-    run_dir = D / "run" / step
-    return [a.python, "-B", a.gunicorn, app, "-w", str(workers), "-k", a.worker_class,
-            "-b", f"127.0.0.1:{a.port}", "--timeout", "180", "--graceful-timeout", "30",
-            "--pid", str(run_dir / "gunicorn.pid"), "--worker-tmp-dir", str(D / "tmp"),
-            "--error-logfile", str(D / "logs" / f"gunicorn_{step}.err"),
-            "--access-logfile", str(D / "logs" / f"access_{step}.log")]
+    argv = cand.gunicorn_argv(a.python, a.gunicorn, a.port, D, D / "run" / step, step,
+                              worker_class=a.worker_class, workers=workers, app=app)
+    argv[argv.index("--timeout") + 1] = "180"
+    return argv
 
 
 def scenario_echo(base, sampler, timeout=load.DEFAULT_TIMEOUT):
@@ -156,7 +156,7 @@ def main(argv=None) -> int:
     ap.add_argument("--port", type=int, required=True)
     ap.add_argument("--python", required=True)
     ap.add_argument("--gunicorn", required=True)
-    ap.add_argument("--worker-class", default="uvicorn_worker.UvicornWorker")
+    ap.add_argument("--worker-class", default=cand.DEFAULT_WORKER_CLASS)
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--steps", default="asgi_echo,golden")
     a = ap.parse_args(argv)
@@ -167,11 +167,12 @@ def main(argv=None) -> int:
         if step == "asgi_echo":
             rc = cand.run_step(D, step, a.port, python=a.python, gunicorn=a.gunicorn, expected_workers=1,
                                argv=argv_for("tools.p1_2.asgi_echo:app", a, D, step, 1),
-                               scenario_fn=scenario_echo, **lim)
+                               scenario_fn=scenario_echo, probe_path="/", ready_log=cand.error_log(D, step), **lim)
         elif step == "golden":
             rc = cand.run_step(D, step, a.port, python=a.python, gunicorn=a.gunicorn, expected_workers=a.workers,
                                argv=argv_for("mhw_app:app", a, D, step, a.workers),
-                               scenario_fn=make_scenario_golden(D, a.port), step_deadline=1800, **lim)
+                               scenario_fn=make_scenario_golden(D, a.port), step_deadline=1800,
+                               ready_log=cand.error_log(D, step), **lim)
         else:
             raise SystemExit(f"unknown step {step}")
         left = sorted(p.name for p in (D / "tmp").iterdir())

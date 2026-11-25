@@ -684,24 +684,52 @@ def worker():
     hold = bytearray(int(opt("--alloc-mb", "0")) * 1024 * 1024)
     for i in range(0, len(hold), 4096):
         hold[i] = 1
+    # readiness modes: the port is open (bound + listening) from the start, but
+    # the app does not answer until --not-ready-for has passed (never with
+    # --never-ready): "close" drops the connection without a response, "503"
+    # answers 503, "hang" reads and never answers
+    ready_at = time.time() + float(opt("--not-ready-for", "0"))
+    never, mode = flag("--never-ready"), opt("--not-ready-mode", "close")
+    marker_log, marker_at, marker_done = opt("--marker-log"), time.time() + float(opt("--marker-after", "0")), False
+    req_log = opt("--req-log")
     sock.settimeout(0.2)
     while True:
+        if marker_log and not marker_done and time.time() >= marker_at:
+            with open(marker_log, "a") as f:
+                f.write("[INFO] Application startup complete.\n")
+            marker_done = True
         try:
             c, _ = sock.accept()
         except socket.timeout:
             continue
         with c:
+            ready = not never and time.time() >= ready_at
+            if not ready and mode == "close":
+                continue
             c.settimeout(2)
             try:
-                c.recv(65536)
+                req = c.recv(65536)
             except OSError:
-                pass
+                req = b""
+            if req_log:
+                with open(req_log, "a") as f:
+                    f.write(f"{time.time()} {ready} {req.split(b' ')[1].decode() if req.count(b' ') > 1 else '?'}\n")
+            if not ready and mode == "hang":
+                time.sleep(3)
+                continue
+            if not ready:
+                c.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                continue
             c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
 
 wpid = os.fork()
 if wpid == 0:
     worker()
     os._exit(0)
+if flag("--master-helper"):  # a direct child of the master that is not a gunicorn worker
+    if os.fork() == 0:
+        sock.close()
+        os.execv("/bin/sleep", ["sleep", "600"])
 if opt("--master-exit-after"):
     time.sleep(float(opt("--master-exit-after")))
     os._exit(0)
@@ -1056,6 +1084,75 @@ def test_v11_number_reused_while_detached_helper_lives(live):
 # ============================================================ configuration
 
 
+# ------------------------------------------------- readiness (Codex r20, P1-2 V-c)
+
+
+def _probe_and_scenario_times(log):
+    rows = [l.split() for l in Path(log).read_text().splitlines()]
+    probes = [float(t) for t, ready, path in rows if path == candidate.DEFAULT_PROBE_PATH]
+    scen = [float(t) for t, ready, path in rows if path == "/"]
+    return rows, probes, scen
+
+
+@pytest.mark.parametrize("mode", ["close", "503", "hang"])
+def test_open_port_without_app_answer_is_not_ready(live, mode):
+    log = live["tmp"] / "req.log"
+    t0 = time.time()
+    assert run(live, "--not-ready-for", "2.5", "--not-ready-mode", mode, "--req-log", str(log)) == candidate.EXIT_OK
+    doc = result(live["D"])
+    rd = doc["ready"]
+    assert rd["ready_after_s"] >= 2.0 and rd["probe_last"]["status"] == 200
+    assert rd["probe_attempts"] >= (1 if mode == "hang" else 2)
+    rows, probes, scen = _probe_and_scenario_times(log)
+    # the scenario (the measurement) starts only after the successful probe, and
+    # every probe request happened before it: probes are never measured
+    assert scen and probes and max(probes) < min(scen)
+    assert all(r[1] == "True" for r in rows if r[2] == "/")
+    if mode != "close":
+        assert any(r[1] == "False" for r in rows)  # the port answered TCP before the app was ready
+    assert min(scen) - t0 >= 2.0
+    assert doc["exit_check"]["state"] == "clean" and no_candidate_left(live["D"], live["port"])
+
+
+def test_never_ready_times_out_and_is_cleaned_up(live):
+    rc = run(live, "--never-ready", "--not-ready-mode", "503", "--helper", startup_timeout=3)
+    assert rc == candidate.EXIT_FAILED
+    doc = result(live["D"])
+    assert doc["startup_problem"].startswith("not ready within 3")
+    assert "load_exit" not in doc and doc["ready"]["ready_after_s"] is None
+    assert doc["ready"]["probe_last"]["status"] == 503
+    assert doc["exit_check"] == {"state": "clean", "port_free": True, "mismatch": False}
+    assert no_candidate_left(live["D"], live["port"])
+
+
+def test_ready_waits_for_the_startup_marker_of_every_worker(live):
+    log = live["tmp"] / "err.log"
+    assert run(live, "--marker-log", str(log), "--marker-after", "2", ready_log=log) == candidate.EXIT_OK
+    rd = result(live["D"])["ready"]
+    assert rd["markers"] == 1 and rd["ready_after_s"] >= 1.8
+    # two workers expected, one marker: never ready, then stopped and checked
+    lv2 = dict(live, D=live["tmp"] / "D2")
+    log2 = live["tmp"] / "err2.log"
+    rc = run(lv2, "--marker-log", str(log2), ready_log=log2, expected_workers=2, workers=2, startup_timeout=3)
+    assert rc == candidate.EXIT_FAILED and no_candidate_left(lv2["D"], live["port"])
+
+
+def test_helper_child_of_master_is_not_counted_as_a_worker(live):
+    rc = run(live, "--master-helper", expected_workers=2, startup_timeout=3)
+    doc = result(live["D"])
+    assert rc == candidate.EXIT_FAILED and len(doc["ready"]["workers"]) == 1
+    assert "workers 1/2" in doc["startup_problem"]
+    assert doc["exit_check"]["state"] == "clean" and no_candidate_left(live["D"], live["port"])
+    # one worker expected: readiness counts only the worker, so the step starts;
+    # the load sampler then still rejects the unclassified child (fail closed)
+    lv2 = dict(live, D=live["tmp"] / "D2")
+    assert run(lv2, "--master-helper", step="t") == candidate.EXIT_FAILED
+    doc = result(lv2["D"], "t")
+    assert doc.get("startup_problem") is None and doc["ready"]["workers"] and len(doc["ready"]["workers"]) == 1
+    assert doc["load_exit"] == 1 and len(doc["monitor"]["recorded"]) >= 3  # master, worker, sleep helper
+    assert no_candidate_left(lv2["D"], live["port"])
+
+
 def test_golden_j01_constant_matches_manifest():
     manifest = json.loads((API / "tests" / "golden" / "manifest.json").read_text())
     assert manifest["cases"]["J01"]["sha256"] == load.GOLDEN_J01_SHA256
@@ -1077,6 +1174,30 @@ def test_gunicorn_argv_single_worker_loopback(tmp_path):
     assert a[:3] == ["/py/bin/python3.11", "-B", "/py/bin/gunicorn"]
     assert a[a.index("-w") + 1] == "1" and a[a.index("-b") + 1] == "127.0.0.1:18031"
     assert "--reload" not in a and "--keyfile" not in a and "--certfile" not in a
+    # P1-2: the worker class is explicit and the deprecated uvicorn.workers is not the default
+    assert a[a.index("-k") + 1] == "uvicorn_worker.UvicornWorker" == candidate.DEFAULT_WORKER_CLASS
+    assert a[a.index("--error-logfile") + 1] == str(candidate.error_log(tmp_path, "x"))
+
+
+def test_gunicorn_argv_worker_class_and_workers_are_configurable(tmp_path):
+    a = candidate.gunicorn_argv("/p", "/g", 1, tmp_path, tmp_path, "x", worker_class="uvicorn.workers.UvicornWorker",
+                                workers=2, app="tools.p1_2.asgi_echo:app")
+    assert a[a.index("-k") + 1] == "uvicorn.workers.UvicornWorker" and a[a.index("-w") + 1] == "2"
+    assert a[3] == "tools.p1_2.asgi_echo:app"
+    with pytest.raises(ValueError):
+        candidate.gunicorn_argv("/p", "/g", 1, tmp_path, tmp_path, "x", worker_class="")
+
+
+def test_cli_passes_worker_class_and_probe(monkeypatch):
+    got = {}
+    monkeypatch.setattr(candidate, "run_step", lambda *a, **k: got.update(k) or 0)
+    base = ["run", "--dir", "/x", "--step", "smoke", "--port", "1", "--python", "/p", "--gunicorn", "/g",
+            "--observe-worker-rss-mb", "1", "--abort-worker-rss-mb", "2", "--abort-min-available-mb", "3"]
+    assert candidate.main(base) == 0
+    assert got["worker_class"] == "uvicorn_worker.UvicornWorker" and got["probe_path"] == candidate.DEFAULT_PROBE_PATH
+    assert got["workers"] == 1 and got["expected_workers"] == 1
+    assert candidate.main(base + ["--worker-class", "x.Y", "--workers", "2", "--probe-path", "/p"]) == 0
+    assert (got["worker_class"], got["workers"], got["expected_workers"], got["probe_path"]) == ("x.Y", 2, 2, "/p")
 
 
 def test_exit_precedence():

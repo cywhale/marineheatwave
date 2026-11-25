@@ -7,7 +7,8 @@ stop + exit check that only signals processes whose identity is proven
 
     python -B -m tools.bench.candidate run --dir D --step smoke|j08|j11|plot|combo --port 18031 \\
         --python PY --gunicorn GUNICORN_SCRIPT \\
-        --observe-worker-rss-mb 1500 --abort-worker-rss-mb 3500 --abort-min-available-mb 6144
+        --observe-worker-rss-mb 1500 --abort-worker-rss-mb 3500 --abort-min-available-mb 6144 \\
+        [--worker-class uvicorn_worker.UvicornWorker] [--workers 1] [--probe-path /api/swagger/mhw/openapi.json]
     python -B -m tools.bench.candidate recover --dir D --mode list|stop --port 18031
 
 D layout: app/API (cwd of the candidate: mhw_app.py, src/, data/mhw.zarr),
@@ -15,6 +16,13 @@ run/<step>/ (launcher.json, candidate.id, candidate.pids, gunicorn.pid,
 result.json; a step directory that already exists is refused), logs/, out/,
 tmp/, home/, xdg/{cache,config,data,state}/, mpl/.  The candidate environment
 is built from scratch (nothing inherited), so no DASK_* or other variable leaks.
+
+Readiness (P1-2, Codex r20): the step starts only when the master is alive,
+exactly the expected number of gunicorn workers exist (helpers are not
+counted), every worker logged "Application startup complete" in the step's
+gunicorn error log, and an HTTP probe the app answers returns 200.  An open TCP
+port is not enough.  The probe is not part of the measurement; a candidate that
+never becomes ready is stopped and checked like any other step.
 
 Exit status: 0 ok, 1 HTTP/result invalid, 2 usage/state-file format, 3 observation
 line crossed (do not start the next step), 4 watchdog abort, 5 exit check failed
@@ -37,6 +45,7 @@ import threading
 import time
 from pathlib import Path
 
+import httpx
 import psutil
 
 from tools.bench import load
@@ -50,6 +59,13 @@ SUBDIRS = ("app/API", "run", "logs", "out", "tmp", "home", "xdg/cache", "xdg/con
 MB = 1024 * 1024
 _SIGS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
 AVAILABLE_SOURCE = "psutil.virtual_memory().available (Linux: /proc/meminfo MemAvailable)"
+# uvicorn.workers is deprecated in uvicorn 0.54; the P1-2 environment uses the
+# separate uvicorn-worker package (doc 29 r3 D2).  Always passed explicitly.
+DEFAULT_WORKER_CLASS = "uvicorn_worker.UvicornWorker"
+# readiness: an HTTP request the app itself answers (after its lifespan startup),
+# never counted as a measurement; the default needs no data read
+DEFAULT_PROBE_PATH = "/api/swagger/mhw/openapi.json"
+READY_MARKER = "Application startup complete"
 
 
 def worst(codes) -> int:
@@ -78,11 +94,18 @@ def candidate_env(D: Path, python: str) -> dict[str, str]:
             "MHW_HEAVY_SLOTS": "1", "MHW_HEAVY_BYTES": "2097152"}
 
 
-def gunicorn_argv(python: str, gunicorn: str, port: int, D: Path, run_dir: Path, step: str) -> list[str]:
-    return [python, "-B", gunicorn, "mhw_app:app", "-w", "1", "-k", "uvicorn.workers.UvicornWorker",
+def error_log(D: Path, step: str) -> Path:
+    return D / "logs" / f"gunicorn_{step}.err"
+
+
+def gunicorn_argv(python: str, gunicorn: str, port: int, D: Path, run_dir: Path, step: str, *,
+                  worker_class: str = DEFAULT_WORKER_CLASS, workers: int = 1, app: str = "mhw_app:app") -> list[str]:
+    if not worker_class:
+        raise ValueError("worker_class must be given explicitly")
+    return [python, "-B", gunicorn, app, "-w", str(workers), "-k", worker_class,
             "-b", f"127.0.0.1:{port}", "--timeout", "600", "--graceful-timeout", "30",
             "--pid", str(run_dir / "gunicorn.pid"), "--worker-tmp-dir", str(D / "tmp"),
-            "--error-logfile", str(D / "logs" / f"gunicorn_{step}.err"),
+            "--error-logfile", str(error_log(D, step)),
             "--access-logfile", str(D / "logs" / f"access_{step}.log")]
 
 
@@ -268,21 +291,76 @@ class Monitor(threading.Thread):
 # -------------------------------------------------------------------------- run
 
 
-def wait_ready(launcher: Launcher, port: int, expected_workers: int, timeout: float) -> str | None:
-    """None when ready, otherwise the reason."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if launcher.proc.poll() is not None:
-            return f"master exited with {launcher.proc.returncode} before ready"
+def gunicorn_workers(master_pid: int) -> list[int]:
+    """Direct children of the master that are gunicorn workers (forked, so the
+    same command line as the master, or a ``gunicorn: worker`` process title).
+    Helpers (resource_tracker, anything the master or a worker spawns with
+    another command line) are never counted."""
+    m = psutil.Process(master_pid)
+    mc = m.cmdline()
+    out = []
+    for c in m.children():
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=1.0):
-                pass
-            if len(psutil.Process(launcher.proc.pid).children()) >= expected_workers:
-                return None
-        except (OSError, psutil.Error):
-            pass
-        time.sleep(0.1)
-    return f"not ready within {timeout} s"
+            cmd = c.cmdline()
+        except psutil.Error:
+            continue
+        if cmd and (cmd == mc or cmd[0].startswith("gunicorn: worker")):
+            out.append(c.pid)
+    return sorted(out)
+
+
+def count_marker(path: Path | None, marker: str = READY_MARKER) -> int | None:
+    if path is None:
+        return None
+    try:
+        return Path(path).read_text(errors="replace").count(marker)
+    except FileNotFoundError:
+        return 0
+
+
+def wait_ready(launcher: Launcher, port: int, expected_workers: int, timeout: float, *,
+               probe_path: str = DEFAULT_PROBE_PATH, probe_status: int = 200, ready_log: Path | None = None,
+               marker: str = READY_MARKER, probe_timeout: float = 5.0, interval: float = 0.2) -> tuple[str | None, dict]:
+    """(None, info) when ready, otherwise (reason, info).
+
+    Ready means all of: the master is alive; exactly ``expected_workers`` gunicorn
+    workers exist (helpers not counted); when ``ready_log`` is given, it holds
+    ``marker`` at least once per worker (every worker finished its lifespan
+    startup); and an HTTP GET of ``probe_path`` returns ``probe_status``.  An open
+    TCP port alone is never enough.  Probe requests are recorded here only and
+    are not part of any measurement."""
+    t0 = time.monotonic()
+    deadline = t0 + timeout
+    info: dict = {"probe_path": probe_path, "probe_status_wanted": probe_status, "expected_workers": expected_workers,
+                  "ready_log": str(ready_log) if ready_log else None, "marker": marker if ready_log else None,
+                  "probe_attempts": 0, "probe_last": None, "workers": None, "markers": None, "ready_after_s": None}
+    with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=probe_timeout,
+                      headers={"Connection": "close"}) as client:
+        while time.monotonic() < deadline:
+            if launcher.proc.poll() is not None:
+                return f"master exited with {launcher.proc.returncode} before ready", info
+            try:
+                workers = gunicorn_workers(launcher.proc.pid)
+            except psutil.Error as exc:
+                workers, info["probe_last"] = [], f"process table: {type(exc).__name__}"
+            info["workers"] = workers
+            info["markers"] = count_marker(ready_log, marker)
+            if len(workers) == expected_workers and (ready_log is None or info["markers"] >= expected_workers):
+                info["probe_attempts"] += 1
+                t = time.monotonic()
+                try:
+                    r = client.get(probe_path)
+                    info["probe_last"] = {"status": r.status_code, "bytes": len(r.content),
+                                          "seconds": round(time.monotonic() - t, 3)}
+                    if r.status_code == probe_status:
+                        info["ready_after_s"] = round(time.monotonic() - t0, 3)
+                        return None, info
+                except httpx.HTTPError as exc:
+                    info["probe_last"] = {"error": type(exc).__name__, "message": str(exc)[:200],
+                                          "seconds": round(time.monotonic() - t, 3)}
+            time.sleep(interval)
+    return (f"not ready within {timeout} s (workers {len(info['workers'] or [])}/{expected_workers}, "
+            f"markers {info['markers']}, last probe {info['probe_last']})"), info
 
 
 def _raise_interrupted(signum, frame):
@@ -296,9 +374,16 @@ def run_step(D: Path, step: str, port: int, *, observe_mb: float, abort_rss_mb: 
              scenario_fn=None, expected_workers: int = 1, startup_timeout: float = 120.0,
              step_deadline: float = 1200.0, http_timeout: float = load.DEFAULT_TIMEOUT,
              term_wait: float = 30.0, abort_term_wait: float = 10.0, table=None,
-             install_handlers: bool = True) -> int:
+             install_handlers: bool = True, worker_class: str = DEFAULT_WORKER_CLASS, workers: int | None = None,
+             app: str = "mhw_app:app", probe_path: str = DEFAULT_PROBE_PATH, probe_status: int = 200,
+             ready_log: Path | None | bool = True, scenario_name: str | None = None,
+             extra_env: dict[str, str] | None = None) -> int:
     """One step on a fresh candidate.  ``argv``/``scenario_fn`` replace gunicorn and
-    the load scenario (tests).  Returns the exit status (module docstring)."""
+    the load scenario (tests, P1-2 tools).  ``ready_log`` True = the gunicorn error
+    log of the step when gunicorn is built here (no marker check for an explicit
+    ``argv`` unless a path is given).  If the candidate never becomes ready, it is
+    stopped and checked like any other step.  Returns the exit status (module
+    docstring)."""
     D = Path(D)
     run_dir = D / "run" / step
     if run_dir.exists():
@@ -308,12 +393,20 @@ def run_step(D: Path, step: str, port: int, *, observe_mb: float, abort_rss_mb: 
         (D / sub).mkdir(parents=True, exist_ok=True)
     run_dir.mkdir(parents=True)
     table = table or pi.platform_table()
+    if workers is None:
+        workers = expected_workers
     if argv is None:
-        argv = gunicorn_argv(python, gunicorn, port, D, run_dir, step)
+        argv = gunicorn_argv(python, gunicorn, port, D, run_dir, step, worker_class=worker_class,
+                             workers=workers, app=app)
+        if ready_log is True:
+            ready_log = error_log(D, step)
+    if ready_log is True or ready_log is False:
+        ready_log = None
     env = candidate_env(D, python or sys.executable)
+    env.update(extra_env or {})  # e.g. POLARS_FORCE_PKG (P1-2 V-c); recorded with the rest of env
     launcher = Launcher(argv, D / "app" / "API", env, run_dir, step=step, port=port, table=table,
                         log_path=D / "logs" / f"candidate_{step}.out")
-    doc: dict = {"step": step, "scenario": STEPS.get(step), "port": port, "argv": argv, "env": env,
+    doc: dict = {"step": step, "scenario": scenario_name or STEPS.get(step), "port": port, "argv": argv, "env": env,
                  "thresholds": {"observe_worker_rss_mb": observe_mb, "abort_worker_rss_mb": abort_rss_mb,
                                 "abort_min_available_mb": abort_avail_mb},
                  "started": time.time()}
@@ -352,7 +445,8 @@ def run_step(D: Path, step: str, port: int, *, observe_mb: float, abort_rss_mb: 
                                                                              "limit_s": step_deadline},))
         timer.daemon = True
         timer.start()
-        problem = wait_ready(launcher, port, expected_workers, startup_timeout)
+        problem, doc["ready"] = wait_ready(launcher, port, expected_workers, startup_timeout,
+                                           probe_path=probe_path, probe_status=probe_status, ready_log=ready_log)
         monitor.fast_mode = False
         if problem:
             doc["startup_problem"] = problem
@@ -363,7 +457,8 @@ def run_step(D: Path, step: str, port: int, *, observe_mb: float, abort_rss_mb: 
                 fn = load.SCENARIOS[STEPS[step]]
                 if step == "smoke":
                     fn = functools.partial(load.scenario_smoke_J01, out_dir=D / "out")
-            rc = load.run_scenario(STEPS.get(step, step), f"http://127.0.0.1:{port}", launcher.proc.pid, D / "out",
+            rc = load.run_scenario(scenario_name or STEPS.get(step, step), f"http://127.0.0.1:{port}", launcher.proc.pid,
+                                   D / "out",
                                    timeout=http_timeout, scenario_fn=fn, expected_workers=expected_workers)
             doc["load_exit"] = rc
             if rc != 0:
@@ -525,6 +620,9 @@ def main(argv=None) -> int:
     r.add_argument("--startup-timeout", type=float, default=120.0)
     r.add_argument("--step-deadline", type=float, default=1200.0)
     r.add_argument("--timeout", type=float, default=load.DEFAULT_TIMEOUT, help="per-request HTTP timeout (s)")
+    r.add_argument("--worker-class", default=DEFAULT_WORKER_CLASS, help="gunicorn -k (recorded in result.json)")
+    r.add_argument("--workers", type=int, default=1, help="gunicorn -w; also the expected worker count")
+    r.add_argument("--probe-path", default=DEFAULT_PROBE_PATH, help="readiness HTTP probe (not measured)")
     c = sub.add_parser("recover", help="identify or stop candidates left by a runner that died")
     c.add_argument("--dir", required=True)
     c.add_argument("--mode", choices=("list", "stop"), required=True)
@@ -534,7 +632,8 @@ def main(argv=None) -> int:
         return run_step(Path(a.dir), a.step, a.port, observe_mb=a.observe_worker_rss_mb,
                         abort_rss_mb=a.abort_worker_rss_mb, abort_avail_mb=a.abort_min_available_mb,
                         python=a.python, gunicorn=a.gunicorn, startup_timeout=a.startup_timeout,
-                        step_deadline=a.step_deadline, http_timeout=a.timeout)
+                        step_deadline=a.step_deadline, http_timeout=a.timeout, worker_class=a.worker_class,
+                        workers=a.workers, expected_workers=a.workers, probe_path=a.probe_path)
     return recover(Path(a.dir), a.mode, a.port)
 
 
