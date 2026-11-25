@@ -72,6 +72,7 @@ READY_MARKER = "Application startup complete"
 ALLOWED_EXTRA_ENV = {"POLARS_FORCE_PKG": frozenset({"compat"})}
 # gunicorn error-log format "[time] [pid] [LEVEL] message"
 _MARKER_LINE = re.compile(r"\[(\d+)\] \[[A-Z]+\] (.*)$")
+_BOOT_MSG = re.compile(r"Booting worker with pid: (\d+)\s*$")
 
 
 def check_extra_env(extra_env: dict | None) -> dict[str, str]:
@@ -330,7 +331,12 @@ def gunicorn_workers(master_pid: int) -> list[int]:
 
 def marker_pids(path: Path | None, marker: str = READY_MARKER) -> list[int] | None:
     """PIDs that logged ``marker`` in a gunicorn error log ("[time] [pid] [LEVEL] msg").
-    A line without that shape never counts."""
+    A line without that shape never counts.
+
+    PID reuse (Codex r22): gunicorn logs "Booting worker with pid: N" when it
+    forks worker N, so such a line clears any marker N logged before; a reused
+    PID then counts only after its new process logs the marker again.  (A log
+    without boot lines, e.g. the test server's, behaves as before.)"""
     if path is None:
         return None
     try:
@@ -340,7 +346,12 @@ def marker_pids(path: Path | None, marker: str = READY_MARKER) -> list[int] | No
     pids = set()
     for line in text.splitlines():
         m = _MARKER_LINE.search(line)
-        if m and marker in m.group(2):
+        if not m:
+            continue
+        boot = _BOOT_MSG.match(m.group(2))
+        if boot:
+            pids.discard(int(boot.group(1)))
+        elif marker in m.group(2):
             pids.add(int(m.group(1)))
     return sorted(pids)
 

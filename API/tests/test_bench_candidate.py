@@ -1197,6 +1197,29 @@ def test_marker_lines_are_matched_to_pids(tmp_path):
     assert candidate.marker_pids(tmp_path / "missing.log") == [] and candidate.marker_pids(None) is None
 
 
+def test_marker_of_a_reused_pid_needs_a_new_marker(tmp_path):
+    """Codex r22: worker 300 logs its marker and exits; gunicorn later boots a new
+    worker that reuses pid 300.  The old marker must not make it ready."""
+    log = tmp_path / "e.log"
+    lines = ["[t] [300] [INFO] Booting worker with pid: 300",
+             "[t] [301] [INFO] Booting worker with pid: 301",
+             "[t] [300] [INFO] Application startup complete.",
+             "[t] [301] [INFO] Application startup complete."]
+    log.write_text("\n".join(lines) + "\n")
+    assert candidate.marker_pids(log) == [300, 301]
+    lines.append("[t] [300] [INFO] Booting worker with pid: 300")      # pid 300 reused
+    log.write_text("\n".join(lines) + "\n")
+    assert candidate.marker_pids(log) == [301]
+    lines.append("[t] [300] [INFO] Application startup complete.")      # the new process is ready
+    log.write_text("\n".join(lines) + "\n")
+    assert candidate.marker_pids(log) == [300, 301]
+    # a boot line naming another pid, or not in gunicorn's shape, clears nothing
+    log.write_text("[t] [300] [INFO] Application startup complete.\n"
+                   "Booting worker with pid: 300\n"
+                   "[t] [1] [INFO] Booting worker with pid: 3000\n")
+    assert candidate.marker_pids(log) == [300]
+
+
 # ----------------------------------------------- extra_env whitelist (r21)
 
 
