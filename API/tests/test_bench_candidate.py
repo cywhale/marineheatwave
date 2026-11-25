@@ -1123,12 +1123,34 @@ def test_linux_real_proc_scan_is_complete_for_our_uid():
 
 @linux_only
 def test_linux_pidfd_is_used_for_signals(live):
-    assert hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal")
+    funcs = pi.pidfd_functions()
+    assert funcs is not None  # os wrappers or the ctypes syscalls
+    print(json.dumps({"pidfd_source": funcs[2], "os_has_pidfd_open": hasattr(os, "pidfd_open")}))
     assert run(live, "--helper") == candidate.EXIT_OK
+    last = result(live["D"])["stops"][-1]
     sent = [s for st in result(live["D"])["stops"] for s in st["signals"] if s["outcome"] == "sent"]
     assert sent and all(s["via"] == "pidfd" for s in sent)
-    assert result(live["D"])["stops"][-1]["pidfd_unavailable"] is False
+    assert last["pidfd_unavailable"] is False and last["pidfd_source"] == funcs[2]
     assert no_candidate_left(live["D"], live["port"])
+
+
+@linux_only
+@pytest.mark.parametrize("prefer_os", [True, False])
+def test_linux_pidfd_syscalls_signal_only_the_opened_process(prefer_os):
+    funcs = pi.pidfd_functions(prefer_os=prefer_os)
+    if funcs is None or (prefer_os and funcs[2] != "os"):
+        pytest.skip("os.pidfd_open not in this interpreter build")
+    popen, psend, source = funcs
+    assert source == ("os" if prefer_os else "ctypes-syscall")
+    p = subprocess.Popen(["sleep", "60"])
+    fd = popen(p.pid)
+    try:
+        psend(fd, signal.SIGTERM)
+    finally:
+        os.close(fd)
+    assert p.wait(10) == -signal.SIGTERM
+    with pytest.raises(ProcessLookupError):
+        popen(p.pid)  # reaped: the pid is gone
 
 
 @linux_only

@@ -46,6 +46,7 @@ low-probability limits, not guarantees.
 """
 from __future__ import annotations
 
+import ctypes
 import errno
 import os
 import re
@@ -465,20 +466,66 @@ def resolve(snapshot: dict[int, Proc], cid: CandidateId, recorded: list[Proc],
 # ---------------------------------------------------------------------- signalling
 
 
+# Linux syscall numbers of pidfd_send_signal / pidfd_open: allocated after the
+# syscall tables were unified (Linux 5.1+), so they are the same on x86_64,
+# aarch64 and every other current architecture (alpha excepted).
+_NR_PIDFD_SEND_SIGNAL = 424
+_NR_PIDFD_OPEN = 434
+
+
+def pidfd_functions(prefer_os: bool = True):
+    """(pidfd_open, pidfd_send_signal, source) or None.
+
+    Prefer the os/signal wrappers; some interpreter builds (e.g. uv-managed
+    python-build-standalone CPython, built against old kernel headers) lack
+    them although the kernel supports pidfd (doc 25 r3: vm214), so fall back
+    to the raw syscalls through ctypes on Linux.  ENOSYS surfaces as OSError."""
+    if prefer_os and hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"):
+        return os.pidfd_open, signal.pidfd_send_signal, "os"
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        sc = libc.syscall
+    except (OSError, AttributeError):
+        return None
+    sc.restype = ctypes.c_long
+
+    def _check(r):
+        if r < 0:
+            e = ctypes.get_errno()
+            raise OSError(e, os.strerror(e))  # ESRCH -> ProcessLookupError, ENOSYS -> OSError
+        return int(r)
+
+    def pidfd_open(pid: int, flags: int = 0) -> int:
+        return _check(sc(ctypes.c_long(_NR_PIDFD_OPEN), ctypes.c_int(pid), ctypes.c_uint(flags)))
+
+    def pidfd_send_signal(fd: int, sig: int, siginfo=None, flags: int = 0) -> None:
+        _check(sc(ctypes.c_long(_NR_PIDFD_SEND_SIGNAL), ctypes.c_int(fd), ctypes.c_int(int(sig)),
+                  ctypes.c_void_p(None), ctypes.c_uint(flags)))
+
+    return pidfd_open, pidfd_send_signal, "ctypes-syscall"
+
+
 class Signaller:
     """Send a signal to one recorded process after re-checking its start.
 
     Linux: pidfd_open first, then the start check, then pidfd_send_signal, so
-    the signal can only reach the checked process.  Without pidfd (macOS tests,
-    or ENOSYS) the check is followed by os.kill and a tiny window remains;
-    ``pidfd_unavailable`` records that.  ``kill`` (tests) replaces the delivery.
+    the signal reaches the process that passed the check (see the start
+    resolution limit in the module docstring).  ``pidfd_source`` says whether
+    the os/signal wrappers or the ctypes syscalls were used.  Without pidfd
+    (macOS tests, or ENOSYS) the check is followed by os.kill and a tiny window
+    remains; ``pidfd_unavailable`` records that.  ``kill`` (tests) replaces the
+    delivery.
     """
 
     def __init__(self, table, kill: Callable[[int, int], None] | None = None):
         self.table = table
         self.kill = kill
-        self.use_pidfd = kill is None and isinstance(table, LinuxProcTable) and table.root == "/proc" \
-            and hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal")
+        funcs = pidfd_functions() if (kill is None and isinstance(table, LinuxProcTable)
+                                      and table.root == "/proc") else None
+        self._pidfd_open, self._pidfd_send, self.pidfd_source = funcs if funcs else (None, None, None)
+        self.use_pidfd = funcs is not None
         self.pidfd_unavailable = not self.use_pidfd and kill is None
         self.log: list[dict] = []
 
@@ -491,13 +538,13 @@ class Signaller:
         fd = None
         if self.use_pidfd:
             try:
-                fd = os.pidfd_open(p.pid)
+                fd = self._pidfd_open(p.pid)
             except ProcessLookupError:
                 return self._record(p, sig, "gone")
             except OSError as exc:
                 if exc.errno != errno.ENOSYS:
                     return self._record(p, sig, f"error:{exc}")
-                self.use_pidfd, self.pidfd_unavailable = False, True
+                self.use_pidfd, self.pidfd_unavailable, self.pidfd_source = False, True, None
         try:
             try:
                 cur = self.table.read(p.pid)
@@ -510,7 +557,7 @@ class Signaller:
             via = "pidfd" if fd is not None else ("injected" if self.kill is not None else "kill")
             try:
                 if fd is not None:
-                    signal.pidfd_send_signal(fd, sig)
+                    self._pidfd_send(fd, sig)
                 elif self.kill is not None:
                     self.kill(p.pid, sig)
                 else:
@@ -548,6 +595,7 @@ class StopResult:
     signals: list[dict]
     rounds: list[dict]
     pidfd_unavailable: bool
+    pidfd_source: str | None = None
 
     @property
     def mismatch(self) -> bool:
@@ -555,7 +603,8 @@ class StopResult:
 
     def as_dict(self) -> dict:
         return {"state": self.state, "port_free": self.port_free, "mismatch": self.mismatch,
-                "pidfd_unavailable": self.pidfd_unavailable, "signals": self.signals,
+                "pidfd_unavailable": self.pidfd_unavailable, "pidfd_source": self.pidfd_source,
+                "signals": self.signals,
                 "rounds": self.rounds, "final": self.final.as_dict()}
 
 
@@ -600,7 +649,7 @@ def stop_candidate(table, cid: CandidateId, recorded: Callable[[], list[Proc]], 
         else:
             pf = port_free(port) if port else None
             state = "residual" if r.state == "alive" or pf is False else "clean"
-        return StopResult(state, r, pf, sg.log, rounds, sg.pidfd_unavailable)
+        return StopResult(state, r, pf, sg.log, rounds, sg.pidfd_unavailable, sg.pidfd_source)
 
     r = check()
     for sig, limit in ((signal.SIGTERM, term_wait), (signal.SIGKILL, kill_wait)):
