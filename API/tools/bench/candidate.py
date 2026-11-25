@@ -36,6 +36,7 @@ import argparse
 import ctypes
 import functools
 import json
+import re
 import os
 import signal
 import socket
@@ -66,6 +67,24 @@ DEFAULT_WORKER_CLASS = "uvicorn_worker.UvicornWorker"
 # never counted as a measurement; the default needs no data read
 DEFAULT_PROBE_PATH = "/api/swagger/mhw/openapi.json"
 READY_MARKER = "Application startup complete"
+# the only variables a caller may add to the candidate environment (r21): every
+# isolation variable (HOME, TMPDIR, PATH, XDG_*, MPL*, PYTHON*) stays ours
+ALLOWED_EXTRA_ENV = {"POLARS_FORCE_PKG": frozenset({"compat"})}
+# gunicorn error-log format "[time] [pid] [LEVEL] message"
+_MARKER_LINE = re.compile(r"\[(\d+)\] \[[A-Z]+\] (.*)$")
+
+
+def check_extra_env(extra_env: dict | None) -> dict[str, str]:
+    """The approved extra settings, or ValueError naming only the key (never the value)."""
+    out = {}
+    for k, v in (extra_env or {}).items():
+        allowed = ALLOWED_EXTRA_ENV.get(k)
+        if allowed is None:
+            raise ValueError(f"extra_env key {k!r} is not allowed (allowed: {sorted(ALLOWED_EXTRA_ENV)})")
+        if v not in allowed:
+            raise ValueError(f"extra_env {k!r}: value not allowed (allowed: {sorted(allowed)})")
+        out[k] = v
+    return out
 
 
 def worst(codes) -> int:
@@ -309,13 +328,21 @@ def gunicorn_workers(master_pid: int) -> list[int]:
     return sorted(out)
 
 
-def count_marker(path: Path | None, marker: str = READY_MARKER) -> int | None:
+def marker_pids(path: Path | None, marker: str = READY_MARKER) -> list[int] | None:
+    """PIDs that logged ``marker`` in a gunicorn error log ("[time] [pid] [LEVEL] msg").
+    A line without that shape never counts."""
     if path is None:
         return None
     try:
-        return Path(path).read_text(errors="replace").count(marker)
+        text = Path(path).read_text(errors="replace")
     except FileNotFoundError:
-        return 0
+        return []
+    pids = set()
+    for line in text.splitlines():
+        m = _MARKER_LINE.search(line)
+        if m and marker in m.group(2):
+            pids.add(int(m.group(1)))
+    return sorted(pids)
 
 
 def wait_ready(launcher: Launcher, port: int, expected_workers: int, timeout: float, *,
@@ -324,16 +351,17 @@ def wait_ready(launcher: Launcher, port: int, expected_workers: int, timeout: fl
     """(None, info) when ready, otherwise (reason, info).
 
     Ready means all of: the master is alive; exactly ``expected_workers`` gunicorn
-    workers exist (helpers not counted); when ``ready_log`` is given, it holds
-    ``marker`` at least once per worker (every worker finished its lifespan
-    startup); and an HTTP GET of ``probe_path`` returns ``probe_status``.  An open
+    workers exist (helpers not counted); when ``ready_log`` is given, EVERY current
+    worker PID has logged ``marker`` (a marker of an earlier, replaced worker does
+    not count: r21); and an HTTP GET of ``probe_path`` returns ``probe_status``.  An open
     TCP port alone is never enough.  Probe requests are recorded here only and
     are not part of any measurement."""
     t0 = time.monotonic()
     deadline = t0 + timeout
     info: dict = {"probe_path": probe_path, "probe_status_wanted": probe_status, "expected_workers": expected_workers,
                   "ready_log": str(ready_log) if ready_log else None, "marker": marker if ready_log else None,
-                  "probe_attempts": 0, "probe_last": None, "workers": None, "markers": None, "ready_after_s": None}
+                  "probe_attempts": 0, "probe_last": None, "workers": None, "markers": None,
+                  "workers_without_marker": None, "ready_after_s": None}
     with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=probe_timeout,
                       headers={"Connection": "close"}) as client:
         while time.monotonic() < deadline:
@@ -344,8 +372,10 @@ def wait_ready(launcher: Launcher, port: int, expected_workers: int, timeout: fl
             except psutil.Error as exc:
                 workers, info["probe_last"] = [], f"process table: {type(exc).__name__}"
             info["workers"] = workers
-            info["markers"] = count_marker(ready_log, marker)
-            if len(workers) == expected_workers and (ready_log is None or info["markers"] >= expected_workers):
+            info["markers"] = marker_pids(ready_log, marker)
+            missing = sorted(set(workers) - set(info["markers"] or [])) if ready_log is not None else []
+            info["workers_without_marker"] = missing
+            if len(workers) == expected_workers and not missing:
                 info["probe_attempts"] += 1
                 t = time.monotonic()
                 try:
@@ -360,7 +390,7 @@ def wait_ready(launcher: Launcher, port: int, expected_workers: int, timeout: fl
                                           "seconds": round(time.monotonic() - t, 3)}
             time.sleep(interval)
     return (f"not ready within {timeout} s (workers {len(info['workers'] or [])}/{expected_workers}, "
-            f"markers {info['markers']}, last probe {info['probe_last']})"), info
+            f"without startup marker {info['workers_without_marker']}, last probe {info['probe_last']})"), info
 
 
 def _raise_interrupted(signum, frame):
@@ -385,6 +415,7 @@ def run_step(D: Path, step: str, port: int, *, observe_mb: float, abort_rss_mb: 
     stopped and checked like any other step.  Returns the exit status (module
     docstring)."""
     D = Path(D)
+    extra_env = check_extra_env(extra_env)  # before anything is created or started
     run_dir = D / "run" / step
     if run_dir.exists():
         print(json.dumps({"step": step, "error": f"{run_dir} exists; a step directory is never reused"}))
@@ -403,10 +434,13 @@ def run_step(D: Path, step: str, port: int, *, observe_mb: float, abort_rss_mb: 
     if ready_log is True or ready_log is False:
         ready_log = None
     env = candidate_env(D, python or sys.executable)
-    env.update(extra_env or {})  # e.g. POLARS_FORCE_PKG (P1-2 V-c); recorded with the rest of env
+    env.update(extra_env)  # only ALLOWED_EXTRA_ENV; the runner's own environment is never copied
     launcher = Launcher(argv, D / "app" / "API", env, run_dir, step=step, port=port, table=table,
                         log_path=D / "logs" / f"candidate_{step}.out")
+    # env holds only variables built here (paths of D, fixed settings) and the
+    # approved extra settings; nothing is inherited from the runner
     doc: dict = {"step": step, "scenario": scenario_name or STEPS.get(step), "port": port, "argv": argv, "env": env,
+                 "extra_env": extra_env,
                  "thresholds": {"observe_worker_rss_mb": observe_mb, "abort_worker_rss_mb": abort_rss_mb,
                                 "abort_min_available_mb": abort_avail_mb},
                  "started": time.time()}

@@ -636,7 +636,7 @@ def test_v12_fixture_pid_reused_between_term_and_kill(fp):
 # ==================================================================== live tests
 
 FAKE = r'''
-import os, signal, socket, sys, time
+import json, os, signal, socket, sys, time
 args = sys.argv[1:]
 def opt(name, default=None):
     return args[args.index(name) + 1] if name in args else default
@@ -674,7 +674,26 @@ def helper():
     while True:
         time.sleep(1)
 
-def worker():
+def worker(gen=1):
+    if opt("--env-dump"):
+        with open(opt("--env-dump"), "a") as f:
+            f.write(json.dumps(dict(os.environ)) + "\n")
+    if gen == 1 and opt("--gen1-exit-after"):
+        # first worker: logs its startup marker at once, never answers, then exits
+        # (gunicorn would replace it); the replacement logs its own marker later
+        signal.signal(signal.SIGTERM, lambda *a: os._exit(0))
+        if opt("--marker-log"):
+            with open(opt("--marker-log"), "a") as f:
+                f.write(f"[t] [{os.getpid()}] [INFO] Application startup complete.\n")
+        end = time.time() + float(opt("--gen1-exit-after"))
+        sock.settimeout(0.1)
+        while time.time() < end:
+            try:
+                c, _ = sock.accept()
+                c.close()
+            except socket.timeout:
+                pass
+        os._exit(0)
     if flag("--worker-ignore-term"):
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
     else:
@@ -696,7 +715,7 @@ def worker():
     while True:
         if marker_log and not marker_done and time.time() >= marker_at:
             with open(marker_log, "a") as f:
-                f.write("[INFO] Application startup complete.\n")
+                f.write(f"[t] [{os.getpid()}] [INFO] Application startup complete.\n")
             marker_done = True
         try:
             c, _ = sock.accept()
@@ -722,10 +741,13 @@ def worker():
                 continue
             c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
 
-wpid = os.fork()
-if wpid == 0:
-    worker()
-    os._exit(0)
+def spawn(gen):
+    pid = os.fork()
+    if pid == 0:
+        worker(gen)
+        os._exit(0)
+    return pid
+wpid = spawn(1)
 if flag("--master-helper"):  # a direct child of the master that is not a gunicorn worker
     if os.fork() == 0:
         sock.close()
@@ -747,6 +769,9 @@ def term(*a):
         pass
     os._exit(0)
 signal.signal(signal.SIGTERM, term)
+if opt("--gen1-exit-after"):
+    os.waitpid(wpid, 0)
+    wpid = spawn(2)
 while True:
     time.sleep(1)
 '''
@@ -1129,12 +1154,80 @@ def test_ready_waits_for_the_startup_marker_of_every_worker(live):
     log = live["tmp"] / "err.log"
     assert run(live, "--marker-log", str(log), "--marker-after", "2", ready_log=log) == candidate.EXIT_OK
     rd = result(live["D"])["ready"]
-    assert rd["markers"] == 1 and rd["ready_after_s"] >= 1.8
+    assert rd["markers"] == rd["workers"] and len(rd["workers"]) == 1 and rd["ready_after_s"] >= 1.8
     # two workers expected, one marker: never ready, then stopped and checked
     lv2 = dict(live, D=live["tmp"] / "D2")
     log2 = live["tmp"] / "err2.log"
     rc = run(lv2, "--marker-log", str(log2), ready_log=log2, expected_workers=2, workers=2, startup_timeout=3)
     assert rc == candidate.EXIT_FAILED and no_candidate_left(lv2["D"], live["port"])
+
+
+def test_marker_of_a_replaced_worker_does_not_make_the_new_one_ready(live):
+    """r21: worker 1 logs its startup and exits; its replacement has not logged yet.
+    Counting markers would see 1 marker for 1 worker and call it ready."""
+    log = live["tmp"] / "err.log"
+    rc = run(live, "--gen1-exit-after", "0.8", "--marker-log", str(log), "--marker-after", "2.5", ready_log=log)
+    assert rc == candidate.EXIT_OK
+    rd = result(live["D"])["ready"]
+    (w,) = rd["workers"]
+    lines = log.read_text().splitlines()
+    first = int(lines[0].split("] [")[1].split("]")[0])
+    assert first != w and first in rd["markers"] and w in rd["markers"]  # two generations, both logged
+    assert rd["ready_after_s"] >= 0.8 + 2.5 - 0.3  # only after the replacement's own marker
+    assert result(live["D"])["exit_check"]["state"] == "clean" and no_candidate_left(live["D"], live["port"])
+
+
+def test_replacement_without_marker_never_becomes_ready(live):
+    log = live["tmp"] / "err.log"
+    rc = run(live, "--gen1-exit-after", "0.5", "--marker-log", str(log), "--marker-after", "999", ready_log=log,
+             startup_timeout=4)
+    doc = result(live["D"])
+    assert rc == candidate.EXIT_FAILED and "without startup marker" in doc["startup_problem"]
+    assert doc["ready"]["workers_without_marker"] == doc["ready"]["workers"]
+    assert no_candidate_left(live["D"], live["port"])
+
+
+def test_marker_lines_are_matched_to_pids(tmp_path):
+    log = tmp_path / "e.log"
+    log.write_text("[2026-11-25 18:39:22 +0800] [2010324] [INFO] Application startup complete.\n"
+                   "Application startup complete.\n"                     # no pid: ignored
+                   "[x] [77] [INFO] Waiting for application startup.\n"
+                   "[x] [abc] [INFO] Application startup complete.\n")    # bad pid: ignored
+    assert candidate.marker_pids(log) == [2010324]
+    assert candidate.marker_pids(tmp_path / "missing.log") == [] and candidate.marker_pids(None) is None
+
+
+# ----------------------------------------------- extra_env whitelist (r21)
+
+
+@pytest.mark.parametrize("key", ["HOME", "TMPDIR", "PATH", "PYTHONPATH", "XDG_CACHE_HOME", "MPLCONFIGDIR",
+                                 "MPLBACKEND", "PYTHONNOUSERSITE", "MHW_HEAVY_SLOTS", "LD_PRELOAD", "DBPASS"])
+def test_extra_env_rejects_isolation_and_unknown_variables(live, key):
+    with pytest.raises(ValueError) as e:
+        run(live, extra_env={key: "/elsewhere-s3cr3t"})
+    assert "s3cr3t" not in str(e.value)
+    assert not (live["D"] / "run").exists()  # refused before anything was created or started
+
+
+@pytest.mark.parametrize("value", ["64", "32", "", "compat "])
+def test_extra_env_polars_only_compat(live, value):
+    with pytest.raises(ValueError):
+        run(live, extra_env={"POLARS_FORCE_PKG": value})
+
+
+def test_extra_env_compat_reaches_the_candidate_and_nothing_else_leaks(live, monkeypatch):
+    monkeypatch.setenv("MHW_RUNNER_ONLY_SECRET", "s3cr3t-runner-value")
+    dump = live["tmp"] / "env.jsonl"
+    assert run(live, "--env-dump", str(dump), extra_env={"POLARS_FORCE_PKG": "compat"}) == candidate.EXIT_OK
+    child = json.loads(dump.read_text().splitlines()[0])
+    assert child["POLARS_FORCE_PKG"] == "compat" and child["HOME"].startswith(str(live["D"]))
+    assert "MHW_RUNNER_ONLY_SECRET" not in child
+    doc = result(live["D"])
+    assert doc["extra_env"] == {"POLARS_FORCE_PKG": "compat"} and doc["env"]["POLARS_FORCE_PKG"] == "compat"
+    assert set(doc["env"]) == set(candidate.candidate_env(live["D"], sys.executable)) | {"POLARS_FORCE_PKG"}
+    for f in [*(live["D"] / "run").rglob("*"), *(live["D"] / "out").rglob("*"), *(live["D"] / "logs").rglob("*")]:
+        if f.is_file():
+            assert "s3cr3t-runner-value" not in f.read_text(errors="replace"), f
 
 
 def test_helper_child_of_master_is_not_counted_as_a_worker(live):
