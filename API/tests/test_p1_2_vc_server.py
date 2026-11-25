@@ -149,3 +149,13 @@ def test_gate_gone_and_zombie_processes_are_skipped(monkeypatch):
 def test_gate_running_updater_blocks(monkeypatch):
     got, _ = _gate_with(monkeypatch, [_P(20, ["python3", "update_mhw.py"])])
     assert got == ["update_mhw running (pid 20)"]
+
+
+def test_parse_spec_per_candidate_worker_class(tmp_path):
+    """V-d: old (uvicorn.workers) and new (uvicorn_worker) environments in one paired run."""
+    s = vc.parse_spec(f"OLD:{tmp_path}:18281:/py311/python:/py311/gunicorn:uvicorn.workers.UvicornWorker", "dflt")
+    assert s["worker_class"] == "uvicorn.workers.UvicornWorker" and s["port"] == 18281 and s["D"] == tmp_path.resolve()
+    assert vc.parse_spec(f"NEW:{tmp_path}:18282:/v/python:/v/gunicorn", "dflt")["worker_class"] == "dflt"
+    for bad in ("A:d:1:p", f"A:{tmp_path}:1:p:g:w:x", f"A:{tmp_path}:1:p:g:", "A::1:p:g"):
+        with pytest.raises(ValueError):
+            vc.parse_spec(bad, "dflt")

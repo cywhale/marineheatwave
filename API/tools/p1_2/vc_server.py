@@ -280,11 +280,21 @@ def measure_paired(bases: dict[str, str], rounds: int, warmup: int = 1, timeout:
             "stats": stats, "problems": problems}
 
 
+def parse_spec(s: str, default_worker_class: str) -> dict:
+    """LABEL:DIR:PORT:PYTHON:GUNICORN[:WORKER_CLASS] (V-d: the old environment needs
+    uvicorn.workers.UvicornWorker, the new one uvicorn_worker.UvicornWorker)."""
+    parts = s.split(":")
+    if len(parts) not in (5, 6) or not all(parts):
+        raise ValueError(f"bad --spec {s!r}: LABEL:DIR:PORT:PYTHON:GUNICORN[:WORKER_CLASS]")
+    label, d, port, py, gun = parts[:5]
+    return {"label": label, "D": Path(d).resolve(), "port": int(port), "python": py, "gunicorn": gun,
+            "worker_class": parts[5] if len(parts) == 6 else default_worker_class}
+
+
 def cmd_paired(a) -> int:
     specs = []
     for s in a.spec:
-        label, d, port, py, gun = s.split(":", 4)
-        specs.append({"label": label, "D": Path(d).resolve(), "port": int(port), "python": py, "gunicorn": gun})
+        specs.append(parse_spec(s, a.worker_class))
     out: dict = {"prod": a.prod, "specs": [dict(s, D=str(s["D"])) for s in specs], "bases": {}, "inner_rc": {},
                  "gates": {}}
     if a.prod:
@@ -311,7 +321,7 @@ def cmd_paired(a) -> int:
             return {"label": s["label"]}
 
         return cand.run_step(s["D"], f"paired{a.step_suffix}", s["port"], python=s["python"], gunicorn=s["gunicorn"],
-                             worker_class=a.worker_class, expected_workers=1, workers=1, scenario_fn=scenario,
+                             worker_class=s["worker_class"], expected_workers=1, workers=1, scenario_fn=scenario,
                              scenario_name=f"vc_paired_{s['label']}", install_handlers=(i == 0),
                              step_deadline=1800, **LIMITS)
 
@@ -339,7 +349,7 @@ def main(argv=None) -> int:
     s.add_argument("--step-suffix", default="")
     s.add_argument("--worker-class", default=cand.DEFAULT_WORKER_CLASS)
     p = sub.add_parser("paired")
-    p.add_argument("--spec", action="append", required=True, help="LABEL:DIR:PORT:PYTHON:GUNICORN")
+    p.add_argument("--spec", action="append", required=True, help="LABEL:DIR:PORT:PYTHON:GUNICORN[:WORKER_CLASS]")
     p.add_argument("--prod", default=None, help="production L2 loopback base URL (optional)")
     p.add_argument("--rounds", type=int, default=30)
     p.add_argument("--out", required=True)
