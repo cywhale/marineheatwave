@@ -155,3 +155,57 @@ def test_attribute_change_entry_and_file_changes_fail(stores):
 def test_metadata_file_classifier():
     assert uc.is_metadata_file("anomaly/sst/.zarray") and uc.is_metadata_file(".zmetadata")
     assert not uc.is_metadata_file("anomaly/sst/269.0.0") and not uc.is_metadata_file("anomaly/date/1")
+
+
+@pytest.mark.parametrize("value", [
+    None, "inline", 1, [], {},
+    {"kind": "inline"},                                                     # missing keys
+    {"kind": "inline", "must_understand": False},
+    {"kind": "external", "must_understand": False, "metadata": {}},         # wrong envelope kind
+    {"kind": "inline", "must_understand": True, "metadata": {}},
+    {"kind": "inline", "must_understand": 0, "metadata": {}},               # 0 == False, but not a JSON false
+    {"kind": "inline", "must_understand": "false", "metadata": {}},
+    {"kind": "inline", "must_understand": False, "metadata": None},
+    {"kind": "inline", "must_understand": False, "metadata": []},
+    {"kind": "inline", "must_understand": False, "metadata": {"anomaly/sst": {"shape": [1]}}},  # not empty
+    {"kind": "inline", "must_understand": False, "metadata": {}, "extra": 1},                   # extra key
+])
+def test_consolidated_metadata_only_the_observed_envelope(stores, value):
+    """r21: only the exact envelope zarr 3.4.2 wrote in V-b is accepted."""
+    files, zmeta = _expected_after()
+    zmeta["anomaly/.zgroup"]["consolidated_metadata"] = value
+    probs = stores(files, zmeta)
+    assert any("zmetadata:anomaly/.zgroup: key 'consolidated_metadata'" in p for p in probs), probs
+
+
+def test_consolidated_metadata_on_another_group_or_in_a_file_fails(stores):
+    env = {"kind": "inline", "must_understand": False, "metadata": {}}
+    files, zmeta = _expected_after()
+    zmeta[".zgroup"]["consolidated_metadata"] = dict(env)
+    assert any("zmetadata:.zgroup: key 'consolidated_metadata'" in p for p in stores(files, zmeta))
+    files, zmeta = _expected_after()
+    files["anomaly/.zgroup"]["consolidated_metadata"] = dict(env)   # only known inside .zmetadata
+    assert any("file:anomaly/.zgroup: key 'consolidated_metadata'" in p for p in stores(files, zmeta))
+
+
+def test_second_append_after_the_rewrite_needs_no_rule(tmp_path):
+    """Before = after the first zarr 3 append (rewrites already present): the
+    second append may only grow the appended arrays by one more date."""
+    _, z1 = _expected_after()
+    before, after = tmp_path / "b", tmp_path / "a"
+    for root, meta in ((before, z1), (after, copy.deepcopy(z1))):
+        for k, v in meta.items():
+            q = root / k
+            q.parent.mkdir(parents=True, exist_ok=True)
+            q.write_text(json.dumps(v))
+        (root / ".zmetadata").write_text(json.dumps({"metadata": meta, "zarr_consolidated_format": 1}))
+    z2 = json.loads((after / ".zmetadata").read_text())
+    for v in ("sst", "sst_anomaly", "level", "td"):
+        z2["metadata"][f"anomaly/{v}/.zarray"]["shape"] = [N_OLD + 2, 720, 1440]
+        f = after / f"anomaly/{v}/.zarray"
+        f.write_text(json.dumps(z2["metadata"][f"anomaly/{v}/.zarray"]))
+    z2["metadata"]["anomaly/date/.zarray"]["shape"] = [N_OLD + 2]
+    (after / "anomaly/date/.zarray").write_text(json.dumps(z2["metadata"]["anomaly/date/.zarray"]))
+    (after / ".zmetadata").write_text(json.dumps(z2))
+    assert uc.metadata_problems(before, after, N_OLD + 1) == []
+    assert uc.metadata_problems(before, after, N_OLD) != []  # wrong expected length is caught

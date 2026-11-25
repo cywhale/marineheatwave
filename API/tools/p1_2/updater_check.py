@@ -345,8 +345,16 @@ METADATA_FILES = (".zarray", ".zattrs", ".zgroup", ".zmetadata")
 APPENDED = tuple(f"{GROUP}/{v}" for v in (*VARS, "date"))  # arrays update_mhw.py extends along date
 # metadata zarr 3 adds when it rewrites this v2 store (doc 29 r3 §7, V-b); each
 # rule: (where, document, key) -> predicate(value before, value after)
+def _is_v2_inline_envelope(a) -> bool:
+    """The exact value zarr 3.4.2 wrote in V-b: {"kind": "inline", "must_understand":
+    false, "metadata": {}} (no other keys, a real JSON false, an empty dict)."""
+    return (type(a) is dict and set(a) == {"kind", "must_understand", "metadata"}
+            and a["kind"] == "inline" and a["must_understand"] is False
+            and type(a["metadata"]) is dict and a["metadata"] == {})
+
+
 KNOWN_REWRITES = {
-    ("zmetadata", f"{GROUP}/.zgroup", "consolidated_metadata"): lambda b, a: b is None and a is not None,
+    ("zmetadata", f"{GROUP}/.zgroup", "consolidated_metadata"): lambda b, a: b is None and _is_v2_inline_envelope(a),
     ("zmetadata", f"{GROUP}/lat/.zarray", "dimension_separator"): lambda b, a: b is None and a == ".",
     ("zmetadata", f"{GROUP}/lon/.zarray", "dimension_separator"): lambda b, a: b is None and a == ".",
 }
