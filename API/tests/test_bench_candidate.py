@@ -25,6 +25,8 @@ from tools.bench import candidate, load
 from tools.bench import procident as pi
 
 API = Path(__file__).resolve().parents[1]
+LINUX = sys.platform.startswith("linux")
+linux_only = pytest.mark.skipif(not LINUX, reason="Linux-only path (doc 24 L1)")
 SHELL = API / "tools" / "bench" / "candidate_recover.sh"
 pytestmark = pytest.mark.skipif(sys.platform not in ("darwin",) and not sys.platform.startswith("linux"),
                                 reason="POSIX only")
@@ -71,8 +73,8 @@ class FakeProc:
         body = header + "\n" + "".join(f"{pid} {start} {ppid} {pgid} {sid}\n" for pid, start, ppid, pgid, sid in rows)
         (self.run / "candidate.pids").write_text(body)
 
-    def table(self):
-        return pi.LinuxProcTable(str(self.root))
+    def table(self, euid=None):
+        return pi.LinuxProcTable(str(self.root), euid=euid)
 
     def py_kill(self, removes: bool):
         def kill(pid, sig):
@@ -88,12 +90,12 @@ class FakeProc:
         return [tuple(l.split()) for l in self.killlog.read_text().splitlines()]
 
     # ---- runners
-    def python(self, mode, removes=True):
-        table = self.table()
+    def python(self, mode, removes=True, euid=None):
+        table = self.table(euid)
         sg = pi.Signaller(table, kill=self.py_kill(removes))
         return candidate.recover(self.D, mode, None, table=table, signaller=sg, term_wait=0, kill_wait=0, poll=0.01)
 
-    def shell(self, mode, removes=True, port_out="", extra=""):
+    def shell(self, mode, removes=True, port_out="", extra="", euid=None, statcmd=None):
         stub = self.killlog.parent / "killstub.sh"
         gone = self.killlog.parent / "gone"
         gone.mkdir(exist_ok=True)
@@ -112,6 +114,10 @@ class FakeProc:
         env = {"PATH": os.environ["PATH"], "MHW_RECOVER_PROC": str(self.root), "MHW_RECOVER_KILL": str(stub),
                "MHW_RECOVER_PORTCHECK": str(portstub), "MHW_RECOVER_TERM_WAIT": "0",
                "MHW_RECOVER_KILL_WAIT": "0", "MHW_RECOVER_POLL": "1", "MHW_RECOVER_TEST_MODE": "1"}
+        if euid is not None:
+            env["MHW_RECOVER_EUID"] = str(euid)
+        if statcmd is not None:
+            env["MHW_RECOVER_STAT"] = str(statcmd)
         p = subprocess.run(["bash", str(SHELL), mode, str(self.run), "18031"], env=env, capture_output=True,
                            text=True, timeout=60)
         return p.returncode, p.stdout
@@ -128,7 +134,7 @@ def shell_sets(out):
 
 def py_sets(fp):
     cid, rec = pi.read_state(str(fp.run), pi.UNIT_LINUX)
-    r = pi.resolve(fp.table().scan(), cid, rec)
+    r = pi.scan_resolve(fp.table(), cid, rec)
     return {"candidate": set(r.targets), "foreign": set(r.foreign), "UNDETERMINED": set(r.undetermined)}, r
 
 
@@ -410,14 +416,100 @@ def test_r14_unreadable_entry_without_candidate_id(fp, unreadable):
     assert rc == 6 and "unreadable" in out
 
 
-def test_r14_vanished_entry_is_gone_not_unreadable(fp):
+def test_r15_entry_present_without_stat_is_undetermined(fp):
+    """V21 (r15 policy): an entry that is still there but has no readable stat is
+    not "gone" (only a confirmed ENOENT on the entry is); Python and shell agree."""
     base_tree(fp)
-    (fp.root / "777").mkdir()  # a pid directory whose stat is already gone
+    (fp.root / "777").mkdir()
     fp.set_master(100, 1000)
     fp.set_pids([])
-    sets, r = py_sets(fp)
-    assert not r.unreadable and sets["candidate"] == {100, 101, 102}
-    assert fp.shell("list")[0] == 1
+    _, r = py_sets(fp)
+    assert [u["pid"] for u in r.unreadable] == [777] and r.state == "undetermined"
+    assert fp.python("list") == candidate.EXIT_UNDETERMINED
+    rc, out = fp.shell("list")
+    assert rc == 6 and "UNREADABLE 777" in out, out
+
+
+def test_r15_confirmed_enoent_on_the_entry_is_gone(fp, unreadable, monkeypatch):
+    base_tree(fp)
+    fp.add(777, 1, 777, 777, 7)
+    (fp.root / "777" / "stat").chmod(0o000)
+    unreadable.append(fp.root / "777" / "stat")
+    target = str(fp.root / "777")
+    real = os.lstat
+
+    def lstat(path, *a, **kw):
+        if str(path) == target:
+            raise FileNotFoundError(2, "No such file or directory", target)
+        return real(path, *a, **kw)
+
+    monkeypatch.setattr(pi.os, "lstat", lstat)
+    table = fp.table()
+    assert table.entry(777) == (pi.GONE, None)
+    table.scan()
+    assert table.bad == [] and table.other_unreadable == []
+
+
+@pytest.mark.parametrize("err", [PermissionError(13, "denied"), OSError(5, "I/O error")])
+def test_r15_unknown_owner_is_fail_closed_python(fp, unreadable, monkeypatch, err):
+    base_tree(fp)
+    fp.set_master(100, 1000)
+    fp.set_pids([])
+    fp.add(777, 1, 777, 777, 7)
+    (fp.root / "777" / "stat").chmod(0o000)
+    unreadable.append(fp.root / "777" / "stat")
+    target = str(fp.root / "777")
+    real = os.lstat
+
+    def lstat(path, *a, **kw):
+        if str(path) == target:
+            raise err
+        return real(path, *a, **kw)
+
+    monkeypatch.setattr(pi.os, "lstat", lstat)
+    table = fp.table(euid=4242)  # even with "another uid" configured, an unknown owner blocks
+    table.scan()
+    assert [b["pid"] for b in table.bad] == [777] and table.bad[0]["owner"] is None
+    assert table.other_unreadable == []
+
+
+def test_r15_unknown_owner_is_fail_closed_shell(fp, unreadable):
+    base_tree(fp)
+    fp.set_master(100, 1000)
+    fp.set_pids([])
+    fp.add(777, 1, 777, 777, 7)
+    (fp.root / "777" / "stat").chmod(0o000)
+    unreadable.append(fp.root / "777" / "stat")
+    stub = fp.killlog.parent / "statstub.sh"
+    stub.write_text(f"""#!/bin/bash
+for a in "$@"; do last=$a; done
+if [ "$last" = "{fp.root}/777" ]; then echo "stat: $last: Permission denied" >&2; exit 1; fi
+exec stat "$@"
+""")
+    stub.chmod(0o755)
+    rc, out = fp.shell("stop", statcmd=stub, euid=4242)
+    assert rc == 6 and "UNREADABLE 777" in out and fp.kills() == [], out
+
+
+def test_r15_other_uid_unreadable_is_listed_not_blocking(fp, unreadable):
+    base_tree(fp)
+    fp.set_master(100, 1000)
+    fp.set_pids([(101, 1001, 100, 100, 100)])
+    fp.add(888, 1, 888, 888, 8)
+    (fp.root / "888" / "stat").chmod(0o000)
+    unreadable.append(fp.root / "888" / "stat")
+    me = os.geteuid()
+    table = fp.table(euid=me + 4242)  # the fixture files are ours, so "another uid" from this view
+    r = pi.scan_resolve(table, *pi.read_state(str(fp.run), pi.UNIT_LINUX))
+    assert r.state == "alive" and r.unreadable == []
+    assert [(o["pid"], o["owner"]) for o in r.other_unreadable] == [(888, me)]
+    assert r.as_dict()["other_unreadable"][0]["pid"] == 888  # in the recorded result
+    assert fp.python("list", euid=me + 4242) == 1
+    rc, out = fp.shell("list", euid=me + 4242)
+    assert rc == 1 and f"OTHER-UID-UNREADABLE 888 uid={me}" in out, out
+    assert shell_sets(out)["candidate"] == {100, 101, 102}
+    # the same entry from our own view blocks
+    assert fp.python("list") == candidate.EXIT_UNDETERMINED and fp.shell("list")[0] == 6
 
 
 def test_r14_signaller_does_not_signal_unreadable_process():
@@ -614,6 +706,9 @@ if opt("--master-exit-after"):
     time.sleep(float(opt("--master-exit-after")))
     os._exit(0)
 def term(*a):
+    if opt("--term-marker"):
+        with open(opt("--term-marker"), "w") as f:
+            f.write(str(os.getpid()))
     try:
         os.kill(wpid, signal.SIGTERM)
     except ProcessLookupError:
@@ -634,7 +729,7 @@ sys.path.insert(0, sys.argv[5])
 from pathlib import Path
 from tools.bench import candidate, load
 D, port, fake, mode = Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4]
-argv = [sys.executable, "-B", fake, "--port", str(port), "--helper"]
+argv = [sys.executable, "-B", fake, "--port", str(port), "--helper"] + sys.argv[6:]
 def blocking(base, sampler, timeout=5):
     with load.httpx.Client(base_url=base, timeout=5) as c:
         while True:
@@ -645,7 +740,8 @@ if mode == "pause_before_id":
         (D / sub).mkdir(parents=True, exist_ok=True)
     (D / "run" / "s").mkdir()
     l = candidate.Launcher(argv, D / "app" / "API", candidate.candidate_env(D, sys.executable), D / "run" / "s",
-                           step="s", port=port, child_pause_before_id=3.0)
+                           step="s", port=port,
+                           child_pause=(str(D / "run" / "s" / ".test_child_paused"), str(D / "release")))
     print("starting", flush=True)
     l.start()
     print("started", flush=True)
@@ -829,9 +925,9 @@ def test_v5_dead_helper_leaves_unrecorded_session_child(live, anchor):
         assert candidate.recover(live["D"], "stop", live["port"]) == candidate.EXIT_UNDETERMINED
 
 
-def _driver(lv, mode):
+def _driver(lv, mode, *extra):
     p = subprocess.Popen([sys.executable, "-B", "-c", DRIVER, str(lv["D"]), str(lv["port"]), lv["fake"], mode,
-                          str(API)], cwd=str(API), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                          str(API), *extra], cwd=str(API), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     lv["started"].append(p.pid)
     return p
 
@@ -861,10 +957,16 @@ def test_v6_runner_interrupted_cleans_up(live, sig):
 def test_v7_runner_killed_before_ready_then_recover(live):
     p = _driver(live, "run")
     _wait_candidate_ready(live)
+    cid = pi.parse_id((live["D"] / "run" / "s" / "candidate.id").read_text())
     p.kill()
     p.wait(10)
-    assert not no_candidate_left(live["D"], live["port"])  # the candidate outlived the runner (no PDEATHSIG here)
-    assert candidate.recover(live["D"], "list", live["port"]) == candidate.EXIT_FAILED
+    if LINUX:
+        # PR_SET_PDEATHSIG: the master gets SIGTERM when the runner dies; recover cleans the rest
+        until(lambda: pi.platform_table().read(cid.master_pid) is None, timeout=30)
+        assert candidate.recover(live["D"], "list", live["port"]) in (candidate.EXIT_OK, candidate.EXIT_FAILED)
+    else:
+        assert not no_candidate_left(live["D"], live["port"])  # no PDEATHSIG on macOS: the candidate outlives it
+        assert candidate.recover(live["D"], "list", live["port"]) == candidate.EXIT_FAILED
     assert candidate.recover(live["D"], "stop", live["port"]) == candidate.EXIT_OK
     assert no_candidate_left(live["D"], live["port"])
 
@@ -874,14 +976,22 @@ def test_v8_runner_killed_before_identity_written_never_execs(live):
     assert p.stdout.readline().strip() == "starting"
     idf = live["D"] / "run" / "s" / "candidate.id"
     marker = live["D"] / "run" / "s" / ".test_child_paused"
-    # synchronise on the child itself: it writes the marker when it enters the pause (Codex round 14 #2)
+    release = live["D"] / "release"
+    # explicit handshake (Codex rounds 14-15): the child announces the pause and then
+    # waits for the release file, which is created only after the runner is dead
     child = int(until(lambda: marker.exists() and marker.read_text().strip(), timeout=20))
-    assert not idf.exists()  # really before candidate.id
+    live["started"].append(child)
+    assert not idf.exists()  # the child is parked before candidate.id
     assert pi.platform_table().read(child) is not None
     p.kill()
     p.wait(10)
-    until(lambda: idf.exists(), timeout=10)  # written by the child itself after the pause
+    assert pi.platform_table().read(p.pid) is None  # the runner is gone ...
+    assert not idf.exists()  # ... and the child still has not passed the pause
+    release.write_text("go")
+    until(lambda: idf.exists(), timeout=10)  # written by the child itself after the release
+    assert idf.stat().st_mtime_ns >= release.stat().st_mtime_ns
     cid = pi.parse_id(idf.read_text())
+    assert cid.master_pid == child
     table = pi.platform_table()
     until(lambda: table.read(cid.master_pid) is None, timeout=10)  # it noticed the runner was gone and exited
     assert pi.port_free(live["port"])  # gunicorn/fake server never started
@@ -994,3 +1104,65 @@ def test_combo_overlap_rule(monkeypatch):
     reqs[-1] = {"path": load.J01, "start": 11.0, "end": 11.1}
     out = load.scenario_combo_p11("http://x", S())["combo_p11"]
     assert all(o["overlaps_plot"] for o in out["overlap"]) and len(out["paths"]) == 6
+
+
+# ============================================================ Linux only (L1)
+
+
+@linux_only
+def test_linux_real_proc_scan_is_complete_for_our_uid():
+    table = pi.LinuxProcTable()
+    snap = table.scan()
+    me = table.read(os.getpid())
+    assert me is not None and snap[os.getpid()] == me
+    assert me.sid == os.getsid(0) and me.pgid == os.getpgid(0)
+    assert table.bad == []  # every entry of our uid is readable
+    # record (not assert) how many entries of other uids are unreadable (hidepid etc.)
+    print(json.dumps({"entries": len(snap), "other_unreadable": len(table.other_unreadable)}))
+
+
+@linux_only
+def test_linux_pidfd_is_used_for_signals(live):
+    assert hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal")
+    assert run(live, "--helper") == candidate.EXIT_OK
+    sent = [s for st in result(live["D"])["stops"] for s in st["signals"] if s["outcome"] == "sent"]
+    assert sent and all(s["via"] == "pidfd" for s in sent)
+    assert result(live["D"])["stops"][-1]["pidfd_unavailable"] is False
+    assert no_candidate_left(live["D"], live["port"])
+
+
+@linux_only
+def test_linux_pdeathsig_terms_master_when_runner_is_killed(live):
+    marker = live["tmp"] / "master_got_term"
+    p = _driver(live, "run", "--term-marker", str(marker))
+    _wait_candidate_ready(live)
+    cid = pi.parse_id((live["D"] / "run" / "s" / "candidate.id").read_text())
+    p.kill()
+    p.wait(10)
+    until(lambda: marker.exists(), timeout=30)  # SIGTERM reached the master only through PR_SET_PDEATHSIG
+    assert int(marker.read_text()) == cid.master_pid
+    until(lambda: pi.platform_table().read(cid.master_pid) is None, timeout=30)
+    assert candidate.recover(live["D"], "stop", live["port"]) == candidate.EXIT_OK
+    assert no_candidate_left(live["D"], live["port"])
+
+
+@linux_only
+@pytest.mark.parametrize("setsid_helper", [False, True])
+def test_linux_shell_recover_on_real_proc(live, setsid_helper):
+    extra = ["--helper"] + (["--helper-setsid"] if setsid_helper else [])
+    l, table, rd = _launch(live, *extra)
+    m = candidate.Monitor(table, l.cid, rd, abort_rss_mb=1e9, abort_avail_mb=0, on_abort=lambda i: None)
+    m.start()
+    until(lambda: len(m.recorded_list()) >= 3)  # master, worker, helper
+    m.halt()
+    pids = {p.pid for p in m.recorded_list()}
+    clean = {"PATH": "/usr/bin:/bin"}  # real use: env -i
+    cmd = ["bash", str(SHELL), "list", str(rd), str(live["port"])]
+    p = subprocess.run(cmd, env=clean, capture_output=True, text=True, timeout=60)
+    assert p.returncode == 1 and pids <= shell_sets(p.stdout)["candidate"], p.stdout
+    cmd[2] = "stop"
+    p = subprocess.run(cmd, env=clean, capture_output=True, text=True, timeout=120)
+    l.reap()
+    assert p.returncode == 0 and "no candidate process" in p.stdout, p.stdout
+    assert all(table.read(x) is None for x in pids)
+    assert no_candidate_left(live["D"], live["port"])

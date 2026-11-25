@@ -94,12 +94,12 @@ class Launcher:
     (candidate.id) before exec, so no candidate code ever runs without it."""
 
     def __init__(self, argv: list[str], cwd: Path, env: dict, run_dir: Path, *, step: str, port: int,
-                 table=None, log_path: Path | None = None, child_pause_before_id: float = 0.0):
+                 table=None, log_path: Path | None = None, child_pause: tuple[str, str] | None = None):
         self.argv, self.cwd, self.env, self.run_dir = argv, Path(cwd), env, Path(run_dir)
         self.step, self.port = step, port
         self.table = table or pi.platform_table()
         self.log_path = log_path
-        self.child_pause_before_id = child_pause_before_id  # tests only (V8)
+        self.child_pause = child_pause  # tests only (V8): (marker, release) handshake before candidate.id
         self.proc: subprocess.Popen | None = None
         self.cid: pi.CandidateId | None = None
         self.id_problem: str | None = None
@@ -110,9 +110,14 @@ class Launcher:
     def _child(self):
         for s in _SIGS:
             signal.signal(s, signal.SIG_DFL)
-        if self.child_pause_before_id:  # tests only (V8): announce the pause, then wait
-            pi.write_atomic(str(self.run_dir / ".test_child_paused"), f"{os.getpid()}\n")
-            time.sleep(self.child_pause_before_id)
+        if self.child_pause:  # tests only (V8): announce the pause, wait for an explicit release
+            marker, release = self.child_pause
+            pi.write_atomic(marker, f"{os.getpid()}\n")
+            give_up = time.monotonic() + 600  # never hang forever if a test dies (not part of the handshake)
+            while not os.path.exists(release):
+                if time.monotonic() > give_up:
+                    os._exit(73)
+                time.sleep(0.01)
         me = self.table.read(os.getpid())
         if me is None or not (me.pgid == me.sid == me.pid):
             os._exit(71)
@@ -183,6 +188,7 @@ class Monitor(threading.Thread):
         self.abort: dict | None = None
         self.errors: list[dict] = []
         self.undetermined_seen: list[dict] = []
+        self.other_unreadable_seen: list[dict] = []
 
     def recorded_list(self) -> list[pi.Proc]:
         with self._lock:
@@ -230,6 +236,8 @@ class Monitor(threading.Thread):
         if res.state == "undetermined":
             self.undetermined_seen.append({"t": time.time(), "pids": sorted(res.undetermined),
                                            "unreadable": [u["pid"] for u in res.unreadable]})
+        if res.other_unreadable and len(self.other_unreadable_seen) < 20:
+            self.other_unreadable_seen.append({"t": time.time(), "entries": res.other_unreadable[:50]})
         if top > self.abort_rss_mb:
             self.trigger_abort({"reason": "worker_rss", "worker_rss_mb": top, "limit_mb": self.abort_rss_mb})
         elif avail < self.abort_avail_mb:
@@ -253,6 +261,7 @@ class Monitor(threading.Thread):
         return {"peak_worker_rss_mb": self.peak_worker_mb, "min_available_mb": self.min_available_mb,
                 "available_source": AVAILABLE_SOURCE, "abort": self.abort, "n_samples": len(self.samples),
                 "errors": self.errors, "undetermined_seen": self.undetermined_seen[:20],
+                "other_unreadable_seen": self.other_unreadable_seen,
                 "recorded": [vars(p) for p in self.recorded_list()]}
 
 
@@ -439,6 +448,7 @@ def _recover_one(rd: Path, mode: str, table, app: str, entry: dict, signaller, t
         entry["no_candidate_id"] = True
         entry["cwd_matches"] = hits
         entry["unreadable"] = list(table.bad)
+        entry["other_unreadable"] = list(table.other_unreadable)
         entry["state"] = "undetermined" if hits or table.bad else "none"
         return [EXIT_UNDETERMINED] if entry["state"] == "undetermined" else []
     try:
