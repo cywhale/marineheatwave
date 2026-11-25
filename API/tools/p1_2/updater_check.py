@@ -10,6 +10,14 @@ NOAA OISST daily files are fixtures built from the store's own last month.
                               --api API_DIR --out report.json
     updater_check.py api-check --store COPY --fixtures FIXDIR --api API_DIR --out api.json  # any API env
 
+Chained appends (P1-2, owner 2026-11-25: 538 -> 539 -> 540 months):
+
+    updater_check.py meta-copy --store COPY --out META_BEFORE_N     # every .z* file, the pre-append metadata
+    updater_check.py run ... --out run_N.json                       # timings, audit of .env / socket / writes
+    updater_check.py diff --before snap_{N-1}.json --after snap_N.json --out diff_N.json
+    updater_check.py verify ... --before-store META_BEFORE_N --earlier-fixtures FIX1 --no-api
+    updater_check.py expect-points --fixtures FIX1 --fixtures FIX2 --out points.json  # for append_server
+
 Fixture assumptions (not verified against the real DB / NOAA, which this round
 may not contact):
 * the DB query returns the full 0.25-degree grid (720 x 1440 rows per month),
@@ -43,7 +51,9 @@ from pathlib import Path
 
 GROUP = "anomaly"
 VARS = ("sst", "sst_anomaly", "level", "td")
-SAMPLES = [(-14.875, 150.125), (0.125, 200.125), (35.125, 140.125), (-60.125, 300.125), (10.125, 125.125)]
+if __package__ in (None, ""):  # run as a script (python -I tools/p1_2/updater_check.py): find tools/
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools.p1_2.points import SAMPLES  # noqa: E402  (same five points everywhere)
 
 
 def _month_after(d: date) -> date:
@@ -127,8 +137,61 @@ def _sha(p: Path) -> str:
 
 
 def snapshot(store) -> dict:
+    """key -> [sha256, size] for every file of the store."""
     root = Path(store)
-    return {str(p.relative_to(root)): _sha(p) for p in sorted(root.rglob("*")) if p.is_file()}
+    return {str(p.relative_to(root)): [_sha(p), p.stat().st_size] for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def _digest(v):
+    return v if isinstance(v, str) else v[0]  # V-b snapshots hold the sha only
+
+
+def _size(v):
+    return None if isinstance(v, str) else v[1]
+
+
+def manifest_diff(before: dict, after: dict) -> dict:
+    """Added / changed / removed keys with sizes and hashes, grouped by array."""
+    def group(k):
+        parts = k.split("/")
+        return "/".join(parts[:-1]) or "."
+    added = sorted(set(after) - set(before))
+    removed = sorted(set(before) - set(after))
+    changed = sorted(k for k in set(after) & set(before) if _digest(after[k]) != _digest(before[k]))
+    out: dict = {"n_before": len(before), "n_after": len(after), "added": {}, "changed": {}, "removed": {},
+                 "unchanged": len(set(after) & set(before)) - len(changed)}
+    for name, keys, src in (("added", added, after), ("changed", changed, after), ("removed", removed, before)):
+        for k in keys:
+            e = {"key": k, "sha256": _digest(src[k]), "size": _size(src[k])}
+            if name == "changed":
+                e.update(sha256_before=_digest(before[k]), size_before=_size(before[k]))
+            out[name].setdefault(group(k), []).append(e)
+    out["bytes_written"] = sum((e["size"] or 0) for name in ("added", "changed") for g in out[name].values() for e in g)
+    out["summary"] = {name: {g: len(v) for g, v in out[name].items()} for name in ("added", "changed", "removed")}
+    return out
+
+
+def cmd_diff(a):
+    d = manifest_diff(json.loads(Path(a.before).read_text()), json.loads(Path(a.after).read_text()))
+    Path(a.out).write_text(json.dumps(d, indent=1))
+    print(json.dumps({"summary": d["summary"], "bytes_written": d["bytes_written"], "unchanged": d["unchanged"]},
+                     indent=1))
+
+
+def cmd_meta_copy(a):
+    """Copy every metadata file (.zarray / .zattrs / .zgroup / .zmetadata) of the
+    store, keeping the layout: the pre-append "before store" for metadata_problems."""
+    import shutil
+    root, out = Path(a.store), Path(a.out)
+    out.mkdir(parents=True, exist_ok=False)
+    n = 0
+    for p in sorted(root.rglob(".z*")):
+        if p.is_file():
+            q = out / p.relative_to(root)
+            q.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(p, q)
+            n += 1
+    print(f"{n} metadata files")
 
 
 def cmd_snapshot(a):
@@ -146,6 +209,7 @@ class _NoNetwork(OSError):
 
 def _block_network():
     def refuse(*a, **k):
+        _NET_ATTEMPTS.append("blocked")
         raise _NoNetwork("network disabled in updater_check")
     socket.socket.connect = refuse
     socket.socket.connect_ex = refuse
@@ -153,15 +217,70 @@ def _block_network():
     socket.getaddrinfo = refuse
 
 
+_NET_ATTEMPTS: list[str] = []
+
+
+def _audit_recorder(store: str, allowed_write_roots: list[str]):
+    """sys.addaudithook: every socket / subprocess / urllib event, every open of a
+    file named .env, and every write-mode open or rename outside the allowed roots."""
+    events: dict = {"socket": [], "subprocess": [], "urllib": [], "dotenv_file_open": [], "write_outside": [],
+                    "write_opens_in_store": 0, "hook_errors": []}
+    roots = [os.path.realpath(r) for r in allowed_write_roots]
+
+    def inside(path) -> bool:
+        rp = os.path.realpath(os.fsdecode(path))
+        return any(rp == r or rp.startswith(r + os.sep) for r in roots)
+
+    def hook(event, args):
+        try:
+            _hook(event, args)
+        except Exception as exc:  # an audit hook must never break the audited call
+            if len(events["hook_errors"]) < 20:
+                events["hook_errors"].append(f"{event}: {type(exc).__name__}: {exc}")
+
+    def _hook(event, args):
+        if event.startswith("socket.") and event not in ("socket.__new__",):
+            events["socket"].append(event)
+        elif event.startswith("subprocess.") or event == "os.system" or event.startswith("os.exec") \
+                or event == "os.posix_spawn":
+            events["subprocess"].append(event)
+        elif event.startswith("urllib."):
+            events["urllib"].append(event)
+        elif event == "open" and args and isinstance(args[0], (str, bytes, os.PathLike)):
+            path, mode, flags = args[0], args[1], args[2] if len(args) > 2 else 0
+            name = os.path.basename(os.fsdecode(path))
+            if name == ".env":
+                events["dotenv_file_open"].append(os.fsdecode(path))
+            writing = (isinstance(mode, str) and any(c in mode for c in "wax+")) or \
+                (isinstance(flags, int) and flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT))
+            if writing:
+                if inside(path):
+                    if os.path.realpath(os.fsdecode(path)).startswith(os.path.realpath(store)):
+                        events["write_opens_in_store"] += 1
+                elif len(events["write_outside"]) < 200:
+                    events["write_outside"].append(os.fsdecode(path))
+        elif event in ("os.rename", "os.replace", "os.remove", "os.unlink", "shutil.rmtree", "os.rmdir"):
+            for x in args[:2]:
+                if isinstance(x, (str, bytes, os.PathLike)) and not inside(x) and len(events["write_outside"]) < 200:
+                    events["write_outside"].append(f"{event}:{os.fsdecode(x)}")
+    return events, hook
+
+
 def cmd_run(a):
     import pandas as pd
 
     fix = Path(a.fixtures).resolve()
     store = str(Path(a.store).resolve())
+    out_path = Path(a.out).resolve() if a.out else None  # the run changes cwd
     _block_network()
 
+    calls = {"load_dotenv": 0, "create_engine": [], "read_sql_query": 0, "requests_get": 0}
     import dotenv
-    dotenv.load_dotenv = lambda *x, **k: False  # never read a .env
+
+    def no_dotenv(*x, **k):  # never read a .env
+        calls["load_dotenv"] += 1
+        return False
+    dotenv.load_dotenv = no_dotenv
     for k in ("DBUSER", "DBPASS", "DBHOST", "DBPORT", "DBNAME", "MHWTABLE"):
         os.environ[k] = "fixture"
 
@@ -173,6 +292,7 @@ def cmd_run(a):
             queries.append("dispose")
 
     def fake_read_sql_query(q, engine, *x, **k):
+        calls["read_sql_query"] += 1
         queries.append(q)
         assert isinstance(engine, Engine)
         return db.copy()
@@ -181,10 +301,15 @@ def cmd_run(a):
     import sqlalchemy
 
     def no_requests(*x, **k):
+        calls["requests_get"] += 1
         raise _NoNetwork("requests.get called: a fixture file is missing")
 
+    def fake_engine(url, *x, **k):
+        calls["create_engine"].append(str(url).split("://", 1)[0])  # the scheme only; never the URL
+        return Engine()
+
     requests.get = no_requests
-    sqlalchemy.create_engine = lambda *x, **k: Engine()
+    sqlalchemy.create_engine = fake_engine
     pd.read_sql_query = fake_read_sql_query
 
     sys.path.insert(0, str(Path(a.api).resolve()))
@@ -193,17 +318,61 @@ def cmd_run(a):
     upd.ZARR_PATH = store
     upd.DATA_PATH = str(fix) + "/"
 
+    # separate timings of the append write and of the explicit consolidation
+    import xarray as xr
+    # to_zarr includes xarray's own consolidation of the store (consolidated=None
+    # on a consolidated v2 store); update_mhw.py then consolidates once more
+    timings = {"to_zarr": [], "consolidate_metadata": []}
+    orig_to_zarr, orig_consolidate = xr.Dataset.to_zarr, upd.zarr.consolidate_metadata
+    active = {"to_zarr": 0}
+
+    def timed_to_zarr(self, *x, **k):
+        t0 = time.perf_counter()
+        active["to_zarr"] += 1
+        try:
+            return orig_to_zarr(self, *x, **k)
+        finally:
+            active["to_zarr"] -= 1
+            timings["to_zarr"].append({"seconds": time.perf_counter() - t0, "mode": k.get("mode"),
+                                       "append_dim": k.get("append_dim")})
+
+    def timed_consolidate(*x, **k):
+        t0 = time.perf_counter()
+        inside = active["to_zarr"] > 0
+        try:
+            return orig_consolidate(*x, **k)
+        finally:
+            timings["consolidate_metadata"].append({"seconds": time.perf_counter() - t0,
+                                                    "caller": "xarray to_zarr (inside)" if inside
+                                                    else "update_mhw.py (explicit)"})
+    xr.Dataset.to_zarr = timed_to_zarr
+    upd.zarr.consolidate_metadata = timed_consolidate
+
     with tempfile.TemporaryDirectory() as cwd:  # relative paths in the module must not matter
+        events, hook = _audit_recorder(store, [store, cwd, tempfile.gettempdir()])
+        sys.addaudithook(hook)  # cannot be removed; this process ends after the run
+        start_dir = os.getcwd()
         os.chdir(cwd)
         t = time.perf_counter()
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            upd.append_to_zarr()
-        dt = time.perf_counter() - t
+        try:
+            with contextlib.redirect_stdout(buf):
+                upd.append_to_zarr()
+        finally:
+            dt = time.perf_counter() - t
+            os.chdir(start_dir)  # never stay in a directory that is about to be removed
     out = buf.getvalue()
     print(out)
-    print(json.dumps({"seconds": round(dt, 1), "queries": queries,
-                      "completed": "All work append to zarr done" in out}, indent=1))
+    rep = {"seconds_total": round(dt, 3), "timings": timings, "queries": queries, "calls": calls,
+           "network_attempts_blocked": len(_NET_ATTEMPTS), "audit": events,
+           "completed": "All work append to zarr done" in out, "stdout_tail": out[-2000:]}
+    rep["no_external_access"] = (not events["socket"] and not events["urllib"] and not events["subprocess"]
+                                 and not events["dotenv_file_open"] and not _NET_ATTEMPTS
+                                 and calls["requests_get"] == 0 and not events["write_outside"]
+                                 and not events["hook_errors"])
+    if out_path:
+        out_path.write_text(json.dumps(rep, indent=1, default=str))
+    print(json.dumps({k: v for k, v in rep.items() if k not in ("stdout_tail",)}, indent=1, default=str))
 
 
 # -------------------------------------------------------------------- verify
@@ -216,8 +385,8 @@ def cmd_verify(a):
 
     fix = Path(a.fixtures)
     meta = json.loads((fix / "fixture.json").read_text())
-    before = json.loads(Path(a.before).read_text())
-    after = snapshot(a.store)
+    before = {k: _digest(v) for k, v in json.loads(Path(a.before).read_text()).items()}
+    after = {k: _digest(v) for k, v in snapshot(a.store).items()}
     rep: dict = {"fixture": meta}
 
     added = sorted(set(after) - set(before))
@@ -258,7 +427,12 @@ def cmd_verify(a):
 
     # structure
     rep["dates"] = {"n": len(dates), "last": str(dates[-1].date()), "prev": str(dates[-2].date()),
-                    "monotonic_unique": bool(dates.is_monotonic_increasing and dates.is_unique)}
+                    "monotonic_unique": bool(dates.is_monotonic_increasing and dates.is_unique),
+                    "consecutive_months": all(_month_after(dates[i].date()) == dates[i + 1].date()
+                                              and dates[i].day == 1 for i in range(len(dates) - 1)),
+                    "first": str(dates[0].date())}
+    coord_files = sorted(k for k in set(after) | set(before) if k.split("/")[:2] in (["anomaly", "lat"], ["anomaly", "lon"]))
+    rep["lat_lon_files_unchanged"] = all(after.get(k) == before.get(k) for k in coord_files) and bool(coord_files)
     rep["dims"] = {v: dict(ds[v].sizes) for v in VARS}
     rep["dtypes"] = {v: str(ds[v].dtype) for v in VARS}
     rep["chunks"] = {v: list(ds[v].encoding.get("chunks", ())) for v in VARS}
@@ -286,14 +460,29 @@ def cmd_verify(a):
                    "prev_month_unchanged": prev_same, "dtype": str(new[v].dtype)}
     rep["values"] = vals
 
+    # earlier appended months (chained appends): still equal to their fixtures
+    rep["earlier_months"] = {}
+    for ef in a.earlier_fixtures or []:
+        emeta = json.loads((Path(ef) / "fixture.json").read_text())
+        eexp = _expected(Path(ef))
+        mon = ds.sel(date=emeta["new_month"]).load()
+        rep["earlier_months"][emeta["new_month"]] = {
+            v: {"nan_pattern_equal": bool(np.array_equal(np.isnan(mon[v].values.astype("f8")), np.isnan(eexp[v]))),
+                "max_abs_diff": float(np.nanmax(np.abs(mon[v].values.astype("f8") - eexp[v]))),
+                "within_tol": float(np.nanmax(np.abs(mon[v].values.astype("f8") - eexp[v])))
+                <= (0.006 if v == "sst" else 0.0)} for v in VARS}
+
     # API on the updated copy (its own startup code, relative data/mhw.zarr)
-    rep["api"] = _api_check(a.api, a.store, meta, exp)
+    rep["api"] = {"ok": True, "skipped": True} if a.no_api else \
+        _api_check(a.api, a.store, [*(a.earlier_fixtures or []), a.fixtures])
 
     f = rep["files"]
     v = rep["values"]
     ok = (not f["removed"] and not f["unexplained"]
           and rep["dates"]["n"] == n_old + 1 and rep["dates"]["last"] == meta["new_month"]
           and rep["dates"]["prev"] == meta["last_month_in_store"] and rep["dates"]["monotonic_unique"]
+          and rep["dates"]["consecutive_months"] and rep["lat_lon_files_unchanged"]
+          and all(x["nan_pattern_equal"] and x["within_tol"] for m in rep["earlier_months"].values() for x in m.values())
           and all(x["nan_pattern_equal"] and x["within_tol"] and x["prev_month_unchanged"] for x in v.values())
           and rep["dtypes"] == {"sst": "float32", "sst_anomaly": "float64", "level": "int64", "td": "float64"}
           and all(s[0] == n_old + 1 for s in rep["zarr_shapes"].values())
@@ -440,24 +629,47 @@ def _expected(fix: Path):
     }
 
 
+def expected_points(fixture_dirs) -> dict:
+    """"lat,lon" -> {month: {field: value or None}} for every fixture month."""
+    import numpy as np
+    from tools.p1_2.points import FIELDS, grid_index
+    out: dict = {}
+    for fd in fixture_dirs:
+        fd = Path(fd)
+        month = json.loads((fd / "fixture.json").read_text())["new_month"]
+        exp = _expected(fd)
+        for lat, lon in SAMPLES:
+            i, j = grid_index(lat, lon)
+            w = {k: (None if np.isnan(exp[k][i, j]) else float(exp[k][i, j])) for k in FIELDS}
+            out.setdefault(f"{lat},{lon}", {})[month] = w
+    return out
+
+
+def cmd_expect_points(a):
+    pts = expected_points(a.fixtures)
+    Path(a.out).write_text(json.dumps(pts, indent=1))
+    print(f"{len(pts)} points x {len(next(iter(pts.values())))} months")
+
+
 def cmd_api_check(a):
     """The API on the updated copy only; runs in any API environment (e.g. the
     zarr 2 / P1-1 one, to check that a store written by zarr 3 stays readable)."""
     import zarr
-    fix = Path(a.fixtures)
-    meta = json.loads((fix / "fixture.json").read_text())
-    res = _api_check(a.api, a.store, meta, _expected(fix))
+    res = _api_check(a.api, a.store, [*(a.earlier_fixtures or []), a.fixtures])
     res["zarr"] = zarr.__version__
     Path(a.out).write_text(json.dumps(res, indent=1, default=str))
     print(json.dumps({"ok": res["ok"], "zarr": res["zarr"], "plot": res["plot"],
-                      "cases": [(c["status"], c.get("n_new_month"), c.get("match")) for c in res["cases"]]}))
+                      "cases": [(c["status"], c.get("match")) for c in res["cases"]]}))
 
 
-def _api_check(api_dir, store, meta, exp):
-    import numpy as np
-
+def _api_check(api_dir, store, fixture_dirs):
+    """In-process (TestClient) API on the store: every sample point returns exactly
+    one row per fixture month with the fixture values; plot is a PNG."""
+    from tools.p1_2.points import compare, url
+    pts = expected_points(fixture_dirs)
+    months = sorted(next(iter(pts.values())))
     api = Path(api_dir).resolve()
-    res = {"cases": []}
+    res = {"cases": [], "months": months}
     with tempfile.TemporaryDirectory() as root:
         (Path(root) / "data").mkdir()
         os.symlink(Path(store).resolve(), Path(root) / "data" / "mhw.zarr")
@@ -469,34 +681,18 @@ def _api_check(api_dir, store, meta, exp):
             from fastapi.testclient import TestClient
             with TestClient(mhw_app.app) as c:
                 for lat, lon in SAMPLES:
-                    i, j = int(round((lat + 89.875) / 0.25)), int(round((lon - 0.125) / 0.25))
-                    qlon = lon if lon <= 180 else lon - 360
-                    u = (f"/api/mhw?lon0={qlon}&lat0={lat}&start={meta['last_month_in_store']}"
-                         f"&end={meta['new_month']}&append=sst,sst_anomaly,level,td")
+                    u = url("json", lat, lon, months[0], months[-1])
                     r = c.get(u)
                     case = {"url": u, "status": r.status_code}
                     if r.status_code == 200:
-                        rows = r.json()
-                        last = [x for x in rows if str(x.get("date", ""))[:10] == meta["new_month"]]
-                        case["n_rows"], case["n_new_month"] = len(rows), len(last)
-                        if last:
-                            x = last[0]
-                            want = {"sst": exp["sst"][i, j], "sst_anomaly": exp["sst_anomaly"][i, j],
-                                    "td": exp["td"][i, j], "level": exp["level"][i, j]}
-                            got = {k: x.get(k) for k in want}
-                            case["got"], case["want"] = got, {k: (None if np.isnan(w) else float(w)) for k, w in want.items()}
-                            case["match"] = all(
-                                (got[k] is None and case["want"][k] is None)
-                                or (got[k] is not None and case["want"][k] is not None
-                                    and abs(got[k] - case["want"][k]) <= (0.006 if k == "sst" else 1e-9))
-                                for k in want)
+                        case.update(compare(r.json(), pts[f"{lat},{lon}"]))
                     res["cases"].append(case)
-                pr = c.get(f"/api/mhw/plot?bbox=(150,-15,152,-13)&period={meta['new_month'][:4]}&sstvar=sst&mode=month")
+                pr = c.get(f"/api/mhw/plot?bbox=(150,-15,152,-13)&period={months[-1][:4]}&sstvar=sst&mode=month")
                 res["plot"] = {"status": pr.status_code, "content_type": pr.headers.get("content-type"),
                                "png": pr.content[:8] == b"\x89PNG\r\n\x1a\n"}
         finally:
             os.chdir(old)
-    res["ok"] = (all(c["status"] == 200 and c.get("n_new_month") == 1 and c.get("match") for c in res["cases"])
+    res["ok"] = (all(c["status"] == 200 and c.get("match") for c in res["cases"])
                  and res["plot"]["status"] == 200 and res["plot"]["png"])
     return res
 
@@ -506,18 +702,27 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("fixtures"); s.add_argument("--store", required=True); s.add_argument("--out", required=True)
     s = sub.add_parser("snapshot"); s.add_argument("--store", required=True); s.add_argument("--out", required=True)
+    s = sub.add_parser("meta-copy"); s.add_argument("--store", required=True); s.add_argument("--out", required=True)
+    s = sub.add_parser("diff")
+    for k in ("--before", "--after", "--out"):
+        s.add_argument(k, required=True)
     s = sub.add_parser("run"); s.add_argument("--store", required=True); s.add_argument("--fixtures", required=True)
-    s.add_argument("--api", required=True)
+    s.add_argument("--api", required=True); s.add_argument("--out")
     s = sub.add_parser("verify")
     for k in ("--store", "--fixtures", "--before", "--api", "--out"):
         s.add_argument(k, required=True)
-    s.add_argument("--before-store", help="read-only pre-update store, to classify metadata rewrites")
+    s.add_argument("--before-store", help="pre-update store or meta-copy, to check metadata changes")
+    s.add_argument("--earlier-fixtures", action="append", help="fixtures of months appended before (chained)")
+    s.add_argument("--no-api", action="store_true", help="skip the in-process API check (no httpx here)")
     s = sub.add_parser("api-check")
     for k in ("--store", "--fixtures", "--api", "--out"):
         s.add_argument(k, required=True)
+    s.add_argument("--earlier-fixtures", action="append")
+    s = sub.add_parser("expect-points"); s.add_argument("--fixtures", action="append", required=True)
+    s.add_argument("--out", required=True)
     a = p.parse_args()
-    {"fixtures": cmd_fixtures, "snapshot": cmd_snapshot, "run": cmd_run, "verify": cmd_verify,
-     "api-check": cmd_api_check}[a.cmd](a)
+    {"fixtures": cmd_fixtures, "snapshot": cmd_snapshot, "meta-copy": cmd_meta_copy, "diff": cmd_diff,
+     "run": cmd_run, "verify": cmd_verify, "api-check": cmd_api_check, "expect-points": cmd_expect_points}[a.cmd](a)
 
 
 if __name__ == "__main__":
