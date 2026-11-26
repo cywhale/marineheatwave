@@ -1,6 +1,6 @@
 # v0.3.0: Phase 1 core milestone — API performance and runtime environment
 
-Status: **released as v0.3.0** (annotated git tag `v0.3.0`). Date of the summary: 2026-11-26. The changes below have been in production since 2026-11-25.
+Version: **v0.3.0**. Date of the summary: 2026-11-26. The changes below have been in production since 2026-11-25.
 
 v0.3.0 covers the core of Phase 1 of the MHW improvement roadmap:
 - the API code fixes that keep outputs unchanged (P1-0 and P1-1);
