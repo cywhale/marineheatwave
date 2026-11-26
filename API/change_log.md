@@ -48,7 +48,7 @@ ODB API of Marine Heatwaves
     -- map latitudes at or above 90 degrees to the dataset's northernmost grid point (89.875) to avoid empty point selections
     -- restrict the local-development Dask scheduler and worker in simu.sh to loopback, disable the worker dashboard, and fail closed if port 8786 is occupied or cannot be checked
 
-#### ver 0.3.0 (draft, not tagged) Phase 1 core milestone: API performance and runtime environment
+#### ver 0.3.0 Phase 1 core milestone: API performance and runtime environment
 
     -- read the zarr store directly with numpy-backed arrays (chunks=None) and only the requested variables; the API no longer connects to the shared Dask scheduler (src/dask_client_manager.py is kept as a no-op shim for old imports)
     -- CSV responses delete their temporary file after sending
