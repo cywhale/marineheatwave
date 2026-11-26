@@ -44,7 +44,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if mode == "redirect":
             self.send_response(302)
-            self.send_header("Location", f"http://127.0.0.1:1/next?SERVICE=WMS&token={SECRET}&authkey={SECRET}")
+            self.send_header("Location", f"http://127.0.0.1:1/next?SERVICE=WMS&token={SECRET}&authkey={SECRET}"
+                                         f"&access_key={SECRET};X-Amz-Credential={SECRET}")
+            self.send_header("Content-Location", f"/c?aws_access_key_id={SECRET}&LAYERS=m")
             self.send_header("Content-Length", "0")
             self.send_header("Connection", "close")
             self.end_headers()
@@ -413,6 +415,18 @@ def test_byte_identity_is_per_pair_not_per_digest_set(server, tmp_path):
         ("extra", "STYLES=a&key=abc"),
         ("base", "?client_secret=abc"),
         ("base", "?jsessionid=abc"),
+        # Codex re-review of 88a4b21: access keys, AWS-style names, ";" separators
+        ("case", "SERVICE=WMS&access_key=abc"),
+        ("case", "SERVICE=WMS&AWS_ACCESS_KEY_ID=abc"),
+        ("case", "SERVICE=WMS&X-Amz-Credential=abc"),
+        ("case", "SERVICE=WMS&X-Amz-Security-Token=abc"),
+        ("case", "SERVICE=WMS&subscription-key=abc"),
+        ("case", "SERVICE=WMS;token=abc"),
+        ("case", "SERVICE=WMS;access_key=abc"),
+        ("extra", "STYLES=a&access_key=abc"),
+        ("extra", "STYLES=a;X-Amz-Credential=abc"),
+        ("base", "?access_key=abc"),
+        ("base", "?SERVICE=WMS;token=abc"),
     ],
 )
 def test_credential_like_query_parameters_are_rejected(tmp_path, where, value):
@@ -449,13 +463,20 @@ def test_url_valued_response_headers_are_redacted(server, tmp_path):
     assert probe.run(probe.load_manifest(p), tmp_path / "out", log=lambda *_: None) == 0
     recs, _ = read_run(tmp_path / "out")
     loc = dict((k.lower(), v) for k, v in recs[0]["headers"])["location"]
-    assert loc == f"http://127.0.0.1:1/next?SERVICE=WMS&token={probe.REDACTED}&authkey={probe.REDACTED}"
+    r = probe.REDACTED
+    assert loc == (f"http://127.0.0.1:1/next?SERVICE=WMS&token={r}&authkey={r}"
+                   f"&access_key={r};X-Amz-Credential={r}")
+    cloc = dict((k.lower(), v) for k, v in recs[0]["headers"])["content-location"]
+    assert cloc == f"/c?aws_access_key_id={r}&LAYERS=m"
     raw = (tmp_path / "out" / "requests.jsonl").read_text() + (tmp_path / "out" / "summary.json").read_text()
     assert SECRET not in raw
 
 
 def test_redact_url_function():
     assert probe.redact_url("https://u:p@h/x?a=1&token=t&B=2") == "https://[redacted]@h/x?a=1&token=[redacted]&B=2"
+    assert (probe.redact_url("/x?SERVICE=WMS&access_key=k1&AWS_ACCESS_KEY_ID=k2&X-Amz-Credential=k3;token=k4")
+            == "/x?SERVICE=WMS&access_key=[redacted]&AWS_ACCESS_KEY_ID=[redacted]"
+               "&X-Amz-Credential=[redacted];token=[redacted]")
     assert probe.redact_url("0; url=/p?sid=9&LAYERS=m") == "0; url=/p?sid=[redacted]&LAYERS=m"
     assert probe.redact_url("/plain/path") == "/plain/path"
 

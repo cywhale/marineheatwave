@@ -62,10 +62,17 @@ Exit codes:
   - Manifests with credentials are rejected:
     - a user name or password in a URL;
     - a credential-like query parameter in `base_url`, a case `query` or an
-      arm's `extra_query`: names such as `key`, `auth`, `authkey` (GeoServer's
-      authkey module), `apikey`/`api_key`, `sig`/`signature`, `password`,
-      `session`/`sessionid`/`sid`, or any name containing `token`, `secret`,
-      `password`, `signature` or `session`;
+      arm's `extra_query`. Names are percent-decoded and lower-cased, with
+      `-` and `.` read as `_`. They are matched in three ways:
+      - exactly: `key`, `auth`, `sig`, `signature`, `pwd`, `password`, `code`,
+        `credential(s)`, `session`, `sessionid`, `jsessionid`, `sid`;
+      - by ending in `key`: `apikey`, `api_key`, `authkey` (GeoServer's authkey
+        module), `access_key`, `subscription_key`, ...;
+      - by containing `token`, `secret`, `password`, `passphrase`,
+        `access_key`, `private_key`, `credential`, `signature` or `session`:
+        `aws_access_key_id`, `x-amz-credential`, `x-amz-security-token`, ...
+
+      Parameters are split on both `&` and `;`;
     - `Authorization`, `Proxy-Authorization`, `Cookie`, `X-Api-Key` or
       `X-Auth-Token` request headers.
   - `Set-Cookie` and other cookie or authorization response headers are written

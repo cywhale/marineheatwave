@@ -56,7 +56,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit
 
 SCHEMA = "mhw-p2-probe/1"
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
@@ -69,9 +69,13 @@ FORBIDDEN_REQUEST_HEADERS = {"authorization", "proxy-authorization", "cookie", "
 # Query-parameter names treated as credentials: rejected in manifests, and their
 # values are redacted in URL-valued response headers (Location etc.).  GeoServer's
 # authkey module uses "authkey".
+# A name is normalized (percent-decoded, lower case, "-" and "." -> "_") and then
+# matched exactly, by substring, or by a trailing "key" (key, apikey, api_key,
+# authkey, access_key, aws_access_key_id is caught by "access_key", ...).
 SECRET_QUERY_KEYS = {"key", "auth", "authkey", "apikey", "api_key", "sig", "signature", "pwd", "passwd",
                      "password", "session", "sessionid", "jsessionid", "sid", "code", "credential", "credentials"}
-SECRET_QUERY_PARTS = ("token", "secret", "password", "passwd", "apikey", "api_key", "authkey", "signature", "session")
+SECRET_QUERY_PARTS = ("token", "secret", "password", "passwd", "passphrase", "apikey", "api_key", "authkey",
+                      "access_key", "accesskey", "private_key", "privatekey", "credential", "signature", "session")
 # Response headers whose value is a URL: written with credential-like query values redacted.
 URL_RESPONSE_HEADERS = {"location", "content-location", "refresh", "link"}
 CASE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -155,12 +159,16 @@ def _nonneg_int(v, where: str) -> int:
 
 def is_secret_key(name: str) -> bool:
     """True for a query-parameter name that looks like a credential."""
-    n = unquote(name).strip().lower().replace("-", "_")
-    return n in SECRET_QUERY_KEYS or any(part in n for part in SECRET_QUERY_PARTS)
+    n = unquote(name).strip().lower().replace("-", "_").replace(".", "_")
+    return (n in SECRET_QUERY_KEYS or n.endswith("key")
+            or any(part in n for part in SECRET_QUERY_PARTS))
 
 
 def _secret_keys_in_query(q: str) -> list[str]:
-    return sorted({k for k, _ in parse_qsl(q, keep_blank_values=True) if is_secret_key(k)})
+    # Split on both "&" and ";" (some servers accept ";" as a separator;
+    # parse_qsl only splits on "&").
+    names = (item.partition("=")[0] for item in re.split(r"[&;]", q) if item)
+    return sorted({k for k in names if is_secret_key(k)})
 
 
 _QUERY_PAIR = re.compile(r"([?&;])([^=&#;\s]+)=([^&#;\s]*)")
