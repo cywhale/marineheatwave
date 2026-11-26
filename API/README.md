@@ -86,7 +86,10 @@ Marine heatwaves (MHWs) evaluated from 0.25-degree gridded NOAA OISST v2.1
 ###### Production layout
 
 - PM2 runs the app `mhwapi` from `conf/ecosystem.config.js`. `conf/start_app.sh` sources `conf/p12_env.sh` (venv path, `POLARS_FORCE_PKG=compat`) and execs gunicorn with two `uvicorn_worker.UvicornWorker` workers.
-- The monthly cron job calls a wrapper script that lives on the production host, **not in this repository**. `update_mhw.sh` here is only a symlink to that host path. The wrapper runs `conf/run_update_mhw.sh`, which runs `update_mhw.py` with the same venv.
+- The monthly cron job calls a wrapper script that lives on the production host, outside the repository. Its code is versioned as `conf/update_mhw_cron.sh.template`; the production copy differs only in the config block (host paths). The wrapper:
+    - runs `conf/run_update_mhw.sh`, which runs `update_mhw.py` with the same venv;
+    - restarts `mhwapi` only after a successful append;
+    - exits non-zero on any failure (exit codes in its header).
 
 ###### Local development (legacy script)
 

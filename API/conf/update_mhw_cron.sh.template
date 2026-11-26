@@ -1,0 +1,136 @@
+#!/bin/bash
+# MHW monthly update, run by cron (50 4 18 * *).  P1-2 wrapper, 2026-11-26 (r2).
+# TEMPLATE: the production copy lives on the API host, outside this repository.
+# It is identical to this file except for the values in the config block.
+# To deploy:
+#   1. copy it outside the repo, fill in the config block (absolute paths; check
+#      them on the host), keep the file private (chmod 700);
+#   2. point the crontab line at the copy.
+# Left unfilled, the placeholder API path makes it stop at `cd` with exit 11,
+# before it takes the lock, writes the log or calls anything.
+#
+# lock -> MHW preflight -> updater (API/conf/run_update_mhw.sh, P1-2 venv) ->
+# classify this run's output -> pm2 restart mhwapi ONLY after a successful append ->
+# wait until the new mhwapi answers.  The exit status is the real result; the
+# summary lines go to stdout too (cron mail) and every line to the log.
+#   0  appended and mhwapi restarted and healthy (with a WARNING line if some NOAA
+#      daily files failed to download: owner 2026-11-26, restart anyway); or no new
+#      data (no restart)
+#   10 another update holds the lock, or an update_mhw.py process is running
+#   11 preflight failed (no update, no restart)
+#   20 updater exited non-zero (no restart)
+#   21 updater exited 0 but its output shows a failed or incomplete append (no restart)
+#   30 PM2 daemon not found at restart time (pm2 not called: never a second daemon)
+#   31 pm2 restart mhwapi failed
+#   32 mhwapi not healthy (new pid + HTTP 200) within READY_TIMEOUT after the restart
+# The shared Dask scheduler is no longer checked: the P1-2 venv has no
+# `distributed`, and the old check could not run under cron anyway.
+set -uo pipefail
+
+# --- config begin
+API=/path/to/marineheatwave/API            # the deployed API directory (the repo's API/)
+logg=$API/tmp/update_mhw.log
+LOCK=$API/tmp/update_mhw.lock
+ENV_SH=$API/conf/p12_env.sh
+RUN_UPDATE=$API/conf/run_update_mhw.sh
+STORE=$API/data/mhw.zarr
+PM2=/path/to/pm2                           # absolute path of the pm2 CLI used for mhwapi
+PM2_HOME_DIR=/path/to/.pm2                 # PM2_HOME of the running daemon that manages mhwapi
+PM2_PATH=/usr/bin:/bin    # must make pm2's "#!/usr/bin/env node" find the same node binary as the PM2 daemon
+CURL=/usr/bin/curl
+HEALTH_URL='https://127.0.0.1:8030/api/mhw?lon0=135&lat0=15&start=2026-01-01&end=2026-10-01'   # as bound by conf/start_app.sh
+READY_TIMEOUT=240
+READY_INTERVAL=2
+# --- config end
+
+say() { echo "$*" | tee -a "$logg"; }
+STATUS_MSG="stopped unexpectedly"
+on_exit() {
+  local rc=$?
+  say "# result: rc=$rc $STATUS_MSG"
+  say "#------------------------------- Update End"
+  say "#------------------------------- $(date '+%Y%m%d %H:%M:%S')"
+}
+finish() { STATUS_MSG=$2; exit "$1"; }
+
+cd "$API" || { echo "cannot cd $API" >&2; exit 11; }
+say "#------------------------------- Update MHW start"
+say "#------------------------------- $(date '+%Y%m%d %H:%M:%S')"
+trap on_exit EXIT
+
+# pm2 CLI with a fixed environment; PM2_HOME is the existing daemon's home
+pm2c() { env -i HOME="$HOME" LANG=C.UTF-8 PATH="$PM2_PATH" PM2_HOME="$PM2_HOME_DIR" "$PM2" "$@" 9>&-; }
+# the existing daemon: live process of this user titled "God Daemon (<PM2_HOME>)",
+# both sockets present.  Checked before EVERY pm2 call: a pm2 CLI that finds no
+# daemon would start a new one.
+pm2_daemon_ok() {
+  local pid
+  [ -S "$PM2_HOME_DIR/rpc.sock" ] && [ -S "$PM2_HOME_DIR/pub.sock" ] || return 1
+  pid=$(cat "$PM2_HOME_DIR/pm2.pid" 2>/dev/null) || return 1
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  [ "$(stat -c %U "/proc/$pid" 2>/dev/null)" = "$(id -un)" ] || return 1
+  tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -qF "God Daemon ($PM2_HOME_DIR)"
+}
+mhw_pid() { pm2_daemon_ok && pm2c pid mhwapi 2>/dev/null | tr -dc '0-9'; }
+health() { "$CURL" -sk -o /dev/null -m 30 -w '%{http_code}' "$HEALTH_URL&_wr=$(date +%s%N)" 9>&- 2>/dev/null; }
+
+# 1. one update at a time
+exec 9>>"$LOCK" || finish 10 "cannot open lock $LOCK"
+flock -n 9 || finish 10 "another update holds $LOCK"
+if others=$(pgrep -f 'update_mhw\.py'); then
+  finish 10 "update_mhw.py already running: $(echo $others)"
+fi
+
+# 2. MHW preflight (no update and no restart unless all pass)
+[ -d "$STORE" ] && [ -r "$STORE" ] || finish 11 "preflight: store not readable: $STORE"
+[ -x "$RUN_UPDATE" ] || finish 11 "preflight: not executable: $RUN_UPDATE"
+if ! pyinfo=$( ( source "$ENV_SH" && "$MHW_VENV/bin/python" -I -c '
+import sys
+import dask, dotenv, netCDF4, numpy, pandas, psycopg, requests, sqlalchemy, xarray, zarr  # noqa
+print(sys.executable, sys.version.split()[0])' ) 2>&1 ); then
+  echo "$pyinfo" >> "$logg"
+  finish 11 "preflight: P1-2 venv check failed"
+fi
+say "# python: $pyinfo"
+pm2_daemon_ok || finish 11 "preflight: PM2 daemon not found in $PM2_HOME_DIR"
+old_pid=$(mhw_pid)
+[[ "$old_pid" =~ ^[1-9][0-9]*$ ]] || finish 11 "preflight: mhwapi not online in PM2"
+say "# preflight ok; mhwapi pid $old_pid"
+
+# 3. the updater; its output goes to the log only, as before
+off=$(stat -c %s "$logg")
+"$RUN_UPDATE" >> "$logg" 2>&1
+urc=$?
+out=$(tail -c +"$((off + 1))" "$logg")   # this run's output (no early-exit pipes under pipefail)
+say "# updater exit: $urc"
+[ "$urc" = 0 ] || finish 20 "updater failed (exit $urc); mhwapi not restarted"
+# update_mhw.py exits 0 on its own aborts, so read this run's output
+if bad=$(grep -E 'Aborting update|Error processing NetCDF files|Warning: Failed to consolidate|Traceback' <<< "$out"); then
+  say "# updater problem lines:"; head -n 3 <<< "$bad" | cut -c1-200 | tee -a "$logg"
+  finish 21 "updater reported a failed or incomplete append; mhwapi not restarted"
+fi
+if ! grep -q '^All work append to zarr done:' <<< "$out"; then
+  if grep -q '^No new data got since:' <<< "$out"; then
+    finish 0 "no new data; mhwapi not restarted"
+  fi
+  finish 21 "updater exit 0 without the append-done line; mhwapi not restarted"
+fi
+# some daily files missing: the month was still appended (owner: restart anyway), but say so
+warn=""
+if miss=$(grep -E 'Failed to download data from' <<< "$out"); then
+  warn=" WARNING: $(grep -c . <<< "$miss") NOAA daily file(s) failed to download; the appended month is incomplete"
+  say "#$warn:"; head -n 3 <<< "$miss" | cut -c1-200 | tee -a "$logg"
+fi
+
+# 4. restart mhwapi on the existing daemon, then wait for the new process to answer
+pm2_daemon_ok || finish 30 "PM2 daemon not found in $PM2_HOME_DIR; mhwapi not restarted"
+pm2c restart mhwapi >> "$logg" 2>&1 || finish 31 "pm2 restart mhwapi failed"
+waited=0
+while :; do
+  new_pid=$(mhw_pid); code=$(health)
+  if [[ "$new_pid" =~ ^[1-9][0-9]*$ ]] && [ "$new_pid" != "$old_pid" ] && [ "$code" = 200 ]; then
+    finish 0 "appended; mhwapi restarted (pid $old_pid -> $new_pid), HTTP 200 after ${waited}s.$warn"
+  fi
+  [ "$waited" -ge "$READY_TIMEOUT" ] && finish 32 "mhwapi not healthy after restart (pid ${new_pid:-none}, HTTP ${code:-none})"
+  sleep "$READY_INTERVAL"; waited=$((waited + READY_INTERVAL))
+done

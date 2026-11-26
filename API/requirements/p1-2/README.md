@@ -66,4 +66,4 @@ uv pip sync --python .venv-tools/bin/python --require-hashes --no-build tools.lo
 
 - `../../conf/p12_env.sh`: the venv path (`MHW_VENV`, default `/home/odbadmin/venvs/mhw-p12`; an `MHW_VENV` set in the environment wins) and `POLARS_FORCE_PKG=compat`. It refuses to continue if the venv has no python.
 - `../../conf/start_app.sh`: the API (gunicorn + uvicorn-worker), started by PM2 through `../../conf/ecosystem.config.js`.
-- `../../conf/run_update_mhw.sh`: the monthly updater, called by the host's cron wrapper. The wrapper is not in this repository; see `../../docs/release_v0.3.0_phase1.md`.
+- `../../conf/run_update_mhw.sh`: the monthly updater, called by the host's cron wrapper. That wrapper lives on the host; its template is `../../conf/update_mhw_cron.sh.template`.

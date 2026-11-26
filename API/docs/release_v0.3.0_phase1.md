@@ -83,7 +83,7 @@ These are two isolated fixture runs, **not** a real NOAA/DB monthly update and *
 
 The wrapper is tested with fakes and one controlled restart, but **the first real update on the new venv is 2026-12-18**. Its log, cron mail and the published month still have to be checked.
 
-**Version-control gap.** The wrapper itself is not in this repository. `API/update_mhw.sh` is a symlink to its host path, so a clone only gets a dangling link (§6).
+**Wrapper template.** The production wrapper lives on the host, outside the repository. Its code is versioned as `conf/update_mhw_cron.sh.template`. The template equals the installed r2 wrapper except for the config block (host paths replaced by placeholders) and a header comment explaining how to deploy it. The old `API/update_mhw.sh`, a symlink to the host path that left a dangling link in every clone, was removed.
 
 **Still open for P1-3:**
 - a daily retry window and an idempotent run;
@@ -99,7 +99,7 @@ The wrapper is tested with fakes and one controlled restart, but **the first rea
 1. Check the 2026-12-18 monthly update (log `# result:` line, cron mail, new month visible in the API).
 2. Formally adopt or change the latency limits (0.3 s; +50 ms).
 3. Production checkout: it still points at the pre-Phase-1 commit, with the deployed files copied in. Decide on push or tag so that files and HEAD agree. Since this documentation commit, the repo also differs from production in comments of `conf/p12_env.sh`, `conf/run_update_mhw.sh` and `conf/ecosystem.config.js` (comments only).
-4. Cron wrapper in version control. Proposal: replace the `API/update_mhw.sh` symlink with a parameterised template (paths and health URL as variables at the top), copied from the verified r2 wrapper, which contains host paths but no secrets. This needs owner approval.
+4. Cron wrapper in version control: done (owner 2026-11-26), `conf/update_mhw_cron.sh.template` (§5). It was checked by `bash -n` and by one run left unfilled, which stops with exit 11. The wrapper's test harness is not in the repository: it was run against the installed r2 on the production host. A change to the template should be re-tested the same way before it is installed. If the production checkout is later updated with git, the removal deletes only its tracked symlink; cron calls the wrapper's absolute path, so it is not affected.
 5. Reboot recovery check (PM2 resurrect with the new app), postponed.
 6. When to retire the pre-Phase-1 Python environment, which the rollback script still uses.
 7. `conf/simu.sh` must not be run as it is (it pip-installs into the current Python, kills processes by name and calls `pm2 start`); see [`README.md`](../README.md#development-and-deployment-maintainers). Moving it to the uv locks would be a small separate change.
