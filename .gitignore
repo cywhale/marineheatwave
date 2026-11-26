@@ -42,3 +42,11 @@ node_modules
 **/*.zarr
 **/daily
 **/monthly_*
+# P1-0 golden tests: local data link stays out; re-include API/tests (overrides **/test* above)
+API/data/
+!API/tests/
+!API/tests/**
+API/tests/**/__pycache__/
+
+# P1-2 official dependency locks (doc 29 r5 §3): the only tracked *.lock files
+!API/requirements/p1-2/*.lock

@@ -69,3 +69,35 @@ Marine heatwaves (MHWs) evaluated from 0.25-degree gridded NOAA OISST v2.1
 ###### Introduction of MHW database by ODB (e-paper in pdf)
 
 - https://www.odb.ntu.edu.tw/wp-content/uploads/2023/05/ODB_Newsletter_21.pdf
+
+#### Development and deployment (maintainers)
+
+- Release notes for the current milestone: [docs/release_v0.3.0_phase1.md](docs/release_v0.3.0_phase1.md); version history: [change_log.md](change_log.md)
+
+###### Dependencies
+
+- The **current** dependency set is the uv lock set in [requirements/p1-2/](requirements/p1-2/README.md): CPython 3.14.10, one venv shared by the API and the monthly updater.
+    - `runtime.lock`: production (API + updater)
+    - `dev.lock`: tests, installed together with `runtime.lock`
+    - `tools.lock`: benchmark/check runners only
+- `runtime.lock` contains `dask[array]` because the updater (`update_mhw.py`) reads data through xarray with Dask chunks. The API itself reads the zarr store without Dask and does **not** use a shared Dask scheduler.
+- `requirements.txt` and `Pipfile` are the **legacy** pins used before 2026-11-25 (Python 3.11, zarr 2, dask/distributed 2025.3). They are kept unchanged for reference and are not used by production.
+
+###### Production layout
+
+- PM2 runs the app `mhwapi` from `conf/ecosystem.config.js`. `conf/start_app.sh` sources `conf/p12_env.sh` (venv path, `POLARS_FORCE_PKG=compat`) and execs gunicorn with two `uvicorn_worker.UvicornWorker` workers.
+- The monthly cron job calls a wrapper script that lives on the production host, outside the repository. Its code is versioned as `conf/update_mhw_cron.sh.template`. The template's executable content equals the production copy except for the config block (host paths as placeholders, plus a guard that exits 11 while a placeholder is left); the template also carries deployment notes as comments. The wrapper:
+    - runs `conf/run_update_mhw.sh`, which runs `update_mhw.py` with the same venv;
+    - restarts `mhwapi` only after a successful append;
+    - exits non-zero on any failure (exit codes in its header).
+
+###### Local development (legacy script)
+
+- **Do not run `conf/simu.sh`.** It is the old local-development script, not migrated to the uv locks, and it is kept only as a record of the old commands. Run as a whole, on any machine including your own, it:
+    - `pip install`s `requirements.txt` into whatever Python is current, changing that environment;
+    - starts a local Dask scheduler and worker, which the current API no longer needs;
+    - starts gunicorn with TLS files and `--reload`;
+    - then `kill -9`s every process whose command line matches `mhw_app`, `dask scheduler` or `dask worker`, which can include unrelated processes;
+    - and runs `pm2 start ./conf/ecosystem.config.js`, whose `cwd` is the production path.
+- For a current local setup, create a venv from `requirements/p1-2/` (runtime + dev) and run `pytest` in `API/`.
+- Moving `simu.sh` to the uv locks (without Dask) is proposed as a small separate change; not decided yet.

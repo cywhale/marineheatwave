@@ -4,6 +4,7 @@
 
   - https://eco.odb.ntu.edu.tw/pub/MHW
   - [Open API](API/) 
+  - API release notes: [v0.3.0 draft, Phase 1 core milestone](API/docs/release_v0.3.0_phase1.md); [change log](API/change_log.md)
   
 * Original reference by Jacox 2020 
 

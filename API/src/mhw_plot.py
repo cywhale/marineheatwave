@@ -1,8 +1,6 @@
 import seaborn as sns
 import matplotlib.dates as mdates
-import matplotlib.pyplot as plt
 import matplotlib.figure as mfigure
-import numpy as np
 import numpy as np
 import pandas as pd
 from typing import Optional
@@ -10,6 +8,7 @@ from datetime import datetime
 import polars as pl
 from fastapi import HTTPException
 from src.mhw_utils import process_mhw_data
+from src.guard import plot_lock
 from io import BytesIO
 # from tempfile import NamedTemporaryFile
 
@@ -73,15 +72,15 @@ def genImageFile(fig):
     return buf
 
 
-async def month_climatology(lon0: float, lat0: float, lon1: Optional[float] = None, lat1: Optional[float] = None, period: Optional[str] = "all", sstvar: Optional[str] = None, palette: Optional[str] = None):
+def month_climatology(lon0: float, lat0: float, lon1: Optional[float] = None, lat1: Optional[float] = None, period: Optional[str] = "all", sstvar: Optional[str] = None, palette: Optional[str] = None):
     # Get data
     enddate = (datetime.today() - pd.DateOffset(months=1)
                ).replace(day=1).date()
     if not sstvar or sstvar.strip() not in ['sst', 'sst_anomaly']:
         sstvar = 'sst'
 
-    _, data = await process_mhw_data(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1,
-                                     start="1982-01-01", end=str(enddate), append=sstvar, mode="month_mean")
+    _, data = process_mhw_data(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1,
+                               start="1982-01-01", end=str(enddate), append=sstvar, mode="month_mean")
 
     # data = data.with_columns(pl.col('date').str.strptime(pl.Date, "%Y-%m-%dT%H:%M:%S", strict=False))
     data = data.with_columns([
@@ -105,53 +104,58 @@ async def month_climatology(lon0: float, lat0: float, lon1: Optional[float] = No
         elif len(palette) > len(period):
             palette = palette[0:len(period)]
 
-    fig, ax = plt.subplots(figsize=(12, 8))
+    # Figure creation .. savefig under the per-worker plot lock (P1-1c)
+    with plot_lock():
+        # A plain Figure (as in region_climatology): no pyplot figure manager, so
+        # nothing keeps the figure alive after the PNG is written (P1-1d).
+        fig = mfigure.Figure(figsize=(12, 8))
+        ax = fig.subplots()
 
-    for i, per in enumerate(period):
-        per = per.strip()
-        chkyear = True
-        try:
-            int(per)
-        except ValueError:
-            chkyear = False
+        for i, per in enumerate(period):
+            per = per.strip()
+            chkyear = True
+            try:
+                int(per)
+            except ValueError:
+                chkyear = False
 
-        if chkyear:
-            # Current year, plot with red
-            yr = int(per[0:4])
-            subset = data.filter(data['year'] == yr)
-            color = "red" if yr == enddate.year else palette[i]
-            label = str(per)
+            if chkyear:
+                # Current year, plot with red
+                yr = int(per[0:4])
+                subset = data.filter(data['year'] == yr)
+                color = "red" if yr == enddate.year else palette[i]
+                label = str(per)
+            else:
+                start_year, end_year = map(lambda x: int(x[0:4]), per.split("-"))
+                subset = data.filter(
+                    (data['year'] >= start_year) & (data['year'] <= end_year))
+                color = palette[i]
+                label = f"{start_year}-{end_year}"
+
+            if not subset.is_empty():
+                monthly_avg = subset.group_by('month').agg(
+                    pl.col(sstvar).mean()).sort('month')
+                ax.plot(monthly_avg['month'],
+                        monthly_avg[sstvar], color=color, label=label)
+
+        if sstvar == 'sst':
+            ylab = 'SST'
         else:
-            start_year, end_year = map(lambda x: int(x[0:4]), per.split("-"))
-            subset = data.filter(
-                (data['year'] >= start_year) & (data['year'] <= end_year))
-            color = palette[i]
-            label = f"{start_year}-{end_year}"
+            ylab = 'SST Anomaly'
 
-        if not subset.is_empty():
-            monthly_avg = subset.group_by('month').agg(
-                pl.col(sstvar).mean()).sort('month')
-            ax.plot(monthly_avg['month'],
-                    monthly_avg[sstvar], color=color, label=label)
+        ax.legend(loc='upper right')
+        ax.set_xlabel('Month')
+        ax.set_ylabel('Average ' + ylab)
+        ax.set_title(
+            f"{ylab} Month Climatology at Lon: {str(lon0) if not lon1 else str(lon0) + ' - ' + str(lon1)}, Lat: {str(lat0) if not lat1 else str(lat0) + ' - ' + str(lat1)}")
+        ax.set_xticks(np.arange(1, 13))
+        ax.set_xticklabels(['Jan', 'Feb', 'Mar', 'Apr',
+                            'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'])
 
-    if sstvar == 'sst':
-        ylab = 'SST'
-    else:
-        ylab = 'SST Anomaly'
-
-    ax.legend(loc='upper right')
-    ax.set_xlabel('Month')
-    ax.set_ylabel('Average ' + ylab)
-    ax.set_title(
-        f"{ylab} Month Climatology at Lon: {str(lon0) if not lon1 else str(lon0) + ' - ' + str(lon1)}, Lat: {str(lat0) if not lat1 else str(lat0) + ' - ' + str(lat1)}")
-    ax.set_xticks(np.arange(1, 13))
-    ax.set_xticklabels(['Jan', 'Feb', 'Mar', 'Apr',
-                        'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'])
-
-    return genImageFile(fig)
+        return genImageFile(fig)
 
 
-async def region_climatology(bbox: str, start: str, end: str, sstvar: Optional[str] = None, palette: Optional[str] = None):
+def region_climatology(bbox: str, start: str, end: str, sstvar: Optional[str] = None, palette: Optional[str] = None):
     bbox_list = bbox.strip('()').split('),(')
     if not sstvar or sstvar.strip() not in ['sst', 'sst_anomaly']:
         sstvar = 'sst'
@@ -166,10 +170,10 @@ async def region_climatology(bbox: str, start: str, end: str, sstvar: Optional[s
         elif len(palette) > len(bbox_list):
             palette = palette[0:len(bbox_list)]
 
-    # fig, ax = plt.subplots(figsize=(12, 8))
-    fig = mfigure.Figure(figsize=(12, 8))
-    ax = fig.subplots()
-
+    # Phase 1 (P1-1c): compute every bbox's area-mean series (a few hundred
+    # values each) before taking the plot lock, so no data is read while the
+    # lock is held.
+    series = []
     for i, bbox_str in enumerate(bbox_list):
         bbox_coords = [float(coord) for coord in bbox_str.split(',')]
         if len(bbox_coords) == 2:
@@ -181,48 +185,56 @@ async def region_climatology(bbox: str, start: str, end: str, sstvar: Optional[s
                 status_code=400, detail="Invalid bounding box format. Must contain 2 or 4 coordinates.")
 
         # print(lon0, lon1, lat0, lat1, start, end)
-        _, df = await process_mhw_data(lon0=lon0, lon1=lon1, lat0=lat0, lat1=lat1,
-                                       start=start, end=end, append=sstvar, mode='area_mean_'+sstvar)
+        _, df = process_mhw_data(lon0=lon0, lon1=lon1, lat0=lat0, lat1=lat1,
+                                 start=start, end=end, append=sstvar, mode='area_mean_'+sstvar)
         df = df.sort('date')  # Ensure data is in chronological order
+        series.append((i, bbox_str, df))
 
-        # Convert date to year-month format for plotting
-        # df = df.with_columns(pl.col('date').dt.strftime('%Y-%m').alias('year_month'))
-        ax.plot(df['date'], df[sstvar].to_list(),
-                color=palette[i], label=f'BBOX{i+1}: ({bbox_str})')
+    # Phase 2: draw in the original order and write the PNG under the plot lock
+    with plot_lock():
+        # fig, ax = plt.subplots(figsize=(12, 8))
+        fig = mfigure.Figure(figsize=(12, 8))
+        ax = fig.subplots()
 
-    if sstvar == 'sst':
-        ylab = 'SST'
-    else:
-        ylab = 'SST Anomaly'
+        for i, bbox_str, df in series:
+            # Convert date to year-month format for plotting
+            # df = df.with_columns(pl.col('date').dt.strftime('%Y-%m').alias('year_month'))
+            ax.plot(df['date'], df[sstvar].to_list(),
+                    color=palette[i], label=f'BBOX{i+1}: ({bbox_str})')
 
-    # Set the date formatter for the x-axis to only display the year
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+        if sstvar == 'sst':
+            ylab = 'SST'
+        else:
+            ylab = 'SST Anomaly'
 
-    # Set the major ticks to be every 5 years
-    # ax.xaxis.set_major_locator(mdates.YearLocator(5))
-    major_ticks = mdates.YearLocator()
-    ax.xaxis.set_major_locator(major_ticks)
+        # Set the date formatter for the x-axis to only display the year
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
 
-    # Set the minor ticks to be each month
-    ax.xaxis.set_minor_locator(mdates.MonthLocator())
+        # Set the major ticks to be every 5 years
+        # ax.xaxis.set_major_locator(mdates.YearLocator(5))
+        major_ticks = mdates.YearLocator()
+        ax.xaxis.set_major_locator(major_ticks)
 
-    # Increase the length of the major ticks
-    ax.tick_params(which='major', length=10)
+        # Set the minor ticks to be each month
+        ax.xaxis.set_minor_locator(mdates.MonthLocator())
 
-    # Calculate the range of years in the data
-    years_range = df['date'].dt.year().max() - df['date'].dt.year().min()
+        # Increase the length of the major ticks
+        ax.tick_params(which='major', length=10)
 
-    # Only display labels for every 5th major tick if years range > 5
-    if years_range >= 10:
-        for i, label in enumerate(ax.xaxis.get_majorticklabels()):
-           if int(label.get_text()) % 5 != 0:
-               label.set_visible(False)
+        # Calculate the range of years in the data (last bbox, as before)
+        years_range = df['date'].dt.year().max() - df['date'].dt.year().min()
 
-    ax.tick_params(which='major', length=10)
-    ax.legend(loc='upper right')
-    ax.set_xlabel("Year")
-    ax.set_ylabel(ylab)
-    ax.set_title(f"{ylab} Climatology from {start} to {end}")
-    fig.autofmt_xdate()
-    # plt.show()
-    return genImageFile(fig)
+        # Only display labels for every 5th major tick if years range > 5
+        if years_range >= 10:
+            for i, label in enumerate(ax.xaxis.get_majorticklabels()):
+               if int(label.get_text()) % 5 != 0:
+                   label.set_visible(False)
+
+        ax.tick_params(which='major', length=10)
+        ax.legend(loc='upper right')
+        ax.set_xlabel("Year")
+        ax.set_ylabel(ylab)
+        ax.set_title(f"{ylab} Climatology from {start} to {end}")
+        fig.autofmt_xdate()
+        # plt.show()
+        return genImageFile(fig)

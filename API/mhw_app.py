@@ -11,17 +11,13 @@ from typing import Optional, List
 from pydantic import BaseModel
 from datetime import date, datetime  # , timedelta
 from tempfile import NamedTemporaryFile
-from src.mhw_utils import process_mhw_data
+from src.mhw_utils import select_mhw_data, finish_mhw_data
 from src.mhw_plot import month_climatology, region_climatology, period2date
+from src.responses import TempFileResponse, remove_temp_file
+from fastapi.concurrency import run_in_threadpool
+from src.guard import run_guarded, is_heavy
 import src.config as config
-# import json, dask
-# This is a more low-level way of setting up Dask for parallel computations, and it doesn't provide some of the additional features of Dask's own distributed scheduler, such as advanced task prioritization and data locality awareness.
-# from multiprocessing.pool import Pool
-# dask.config.set(pool=Pool(4))
-# from dask.distributed import Client
-# client = Client('tcp://localhost:8786')
 import logging
-from src.dask_client_manager import get_dask_client, close_dask_client
 
 LOG = logging.getLogger(__name__)
 
@@ -31,16 +27,18 @@ LOG = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # global dz # old use 'sst_anomaly.zarr', add sst -> mhw.zarr
-    config.dz = xr.open_zarr(
+    # Read directly with numpy-backed lazy arrays (P1-1a): no Dask graph and no
+    # shared Dask client.  cache=False so a whole-variable operation can never
+    # leave that variable resident in the worker (open_zarr does not accept it).
+    config.dz = xr.open_dataset(
         'data/mhw.zarr',
-        chunks='auto',
+        engine='zarr',
         group='anomaly',
+        chunks=None,
+        cache=False,
         decode_times=True,
         consolidated=True,
     )
-    config.dask_client = get_dask_client("mhwapi")
-    if config.dask_client is None:
-        LOG.warning("Dask scheduler unavailable; falling back to local execution.")
     config.gridSz = 0.25
     config.timeLimit = 365
     config.LON_RANGE_LIMIT = 90
@@ -51,8 +49,6 @@ async def lifespan(app: FastAPI):
     yield
     print("Application is shutting down!")
     config.dz.close()
-    close_dask_client("mhwapi")
-    config.dask_client = None
 
 #@app.on_event("shutdown")
 #async def shutdown_event():
@@ -140,12 +136,20 @@ async def read_mhw(
     """
 
     try:
-        _, df = await process_mhw_data(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1, start=start, end=end, append=append)
-        if df.is_empty():
-            raise HTTPException(status_code=400, detail="No data available for the given parameters.")
-        # return JSONResponse(content=df.to_dict(orient='records')) #cannot handle NA when JSONResponse
-        # return JSONResponse(content=json.loads(df.to_json(orient='records'))) # work version in Pandas
-        return JSONResponse(content=df.to_dicts())
+        # P1-1c: build the lazy selection (no data read) in the threadpool, then
+        # run reading, to_dicts and JSONResponse rendering in the lane its size
+        # calls for; a heavy request waits for its slot without holding a thread
+        sel = await run_in_threadpool(select_mhw_data, lon0, lat0, lon1, lat1, start, end, append)
+
+        def work():
+            _, df = finish_mhw_data(sel)
+            if df.is_empty():
+                raise HTTPException(status_code=400, detail="No data available for the given parameters.")
+            # return JSONResponse(content=df.to_dict(orient='records')) #cannot handle NA when JSONResponse
+            # return JSONResponse(content=json.loads(df.to_json(orient='records'))) # work version in Pandas
+            return JSONResponse(content=df.to_dicts())
+
+        return await run_guarded(work, heavy=is_heavy(sel.nbytes))
 
     except HTTPException as herr:
         raise herr
@@ -182,15 +186,31 @@ async def read_mhw_csv(
     """
 
     try:
-        out_file, df = await process_mhw_data(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1, start=start, end=end, append=append)
-        if df.is_empty():
-            raise HTTPException(status_code=400, detail="No data available for the given parameters.")
+        # P1-1c: lazy selection in the threadpool, then reading, write_csv and
+        # the response construction in the lane its size calls for; sending
+        # the file happens after return, outside the lane (small, from disk)
+        sel = await run_in_threadpool(select_mhw_data, lon0, lat0, lon1, lat1, start, end, append)
 
-        temp_file = NamedTemporaryFile(delete=False)
-        # df.to_csv(temp_file.name, index=False) #Pandas solution, work
-        df.write_csv(temp_file.name)  # polars version
+        def work():
+            out_file, df = finish_mhw_data(sel)
+            if df.is_empty():
+                raise HTTPException(status_code=400, detail="No data available for the given parameters.")
 
-        return FileResponse(temp_file.name, media_type="text/csv", filename=out_file+".csv")
+            temp_file = NamedTemporaryFile(delete=False)
+            try:
+                with temp_file:  # close our handle; polars writes by path
+                    df.write_csv(temp_file.name)  # polars version
+                response = TempFileResponse(temp_file.name, media_type="text/csv", filename=out_file+".csv")
+            except BaseException:
+                # no response will own the file: remove it, then let the original
+                # error reach the handlers below unchanged
+                remove_temp_file(temp_file.name, during_error=True)
+                raise
+            # TempFileResponse deletes the file after sending (incl. Range 400/416
+            # early returns and send errors)
+            return response
+
+        return await run_guarded(work, heavy=is_heavy(sel.nbytes))
 
     except HTTPException as herr:
         raise herr
@@ -218,30 +238,36 @@ async def climatology(
     * {mode} = series: Time-series e.g. /api/mhw/plot?bbox=(-90,-10,-80,0),(-150,-5,-90,5)&period=2015-202306&sstvar=sst_anomaly
     * {mode} = month: Month climatology. /api/mhw/plot?bbox=(-90,-60,0,60)&sstvar=sst&period=1982-2011,2012-2021,2022,2023&mode=month
     """
-    if not mode or mode.strip() not in ['month', 'series']:
-        mode = 'series'
+    # P1-1c: every plot is heavy: wait for a heavy slot in the event loop,
+    # then data, plot lock, savefig and the response all run in the heavy lane
+    def work():
+        nonlocal mode
+        if not mode or mode.strip() not in ['month', 'series']:
+            mode = 'series'
 
-    if mode == 'month':
-        bbox_list = bbox.strip('()').split('),(')
-        bbox_coords = [float(coord) for coord in bbox_list[0].split(',')]
-        if len(bbox_coords) == 2:
-            lon0, lat0, lon1, lat1 = bbox_coords[0], bbox_coords[1], None, None
-        elif len(bbox_coords) == 4:
-            lon0, lat0, lon1, lat1 = bbox_coords
+        if mode == 'month':
+            bbox_list = bbox.strip('()').split('),(')
+            bbox_coords = [float(coord) for coord in bbox_list[0].split(',')]
+            if len(bbox_coords) == 2:
+                lon0, lat0, lon1, lat1 = bbox_coords[0], bbox_coords[1], None, None
+            elif len(bbox_coords) == 4:
+                lon0, lat0, lon1, lat1 = bbox_coords
+            else:
+                raise HTTPException(
+                    status_code=400, detail="Invalid bounding box format. Must contain 2 or 4 coordinates.")
+
+            buf = month_climatology(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1, period=period, sstvar=sstvar, palette=palette)
+
         else:
-            raise HTTPException(
-                status_code=400, detail="Invalid bounding box format. Must contain 2 or 4 coordinates.")
+            if period == "all":
+                start = '1982-01-01'
+                end = str((datetime.today() - pd.DateOffset(months=1)
+                           ).replace(day=1).date())
+            else:
+                start, end = period2date(period.strip().split(',')[0])
 
-        buf = await month_climatology(lon0=lon0, lat0=lat0, lon1=lon1, lat1=lat1, period=period, sstvar=sstvar, palette=palette)
+            buf = region_climatology(bbox, start, end, sstvar, palette)
 
-    else:
-        if period == "all":
-            start = '1982-01-01'
-            end = str((datetime.today() - pd.DateOffset(months=1)
-                       ).replace(day=1).date())
-        else:
-            start, end = period2date(period.strip().split(',')[0])
+        return StreamingResponse(buf, media_type="image/png")
 
-        buf = await region_climatology(bbox, start, end, sstvar, palette)
-
-    return StreamingResponse(buf, media_type="image/png")
+    return await run_guarded(work, heavy=True)

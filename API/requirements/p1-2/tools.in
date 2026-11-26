@@ -1,0 +1,4 @@
+# runner-only venv for the V-c tools (tools/bench, tools/p1_2): never the API
+-c dev.lock
+psutil
+httpx

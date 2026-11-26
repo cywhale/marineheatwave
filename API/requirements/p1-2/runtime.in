@@ -1,0 +1,22 @@
+# P1-2 V-c merged API + monthly-updater production set (owner 2026-11-25: one shared uv venv;
+# psycopg 3 via psycopg[binary]).  A and B differ ONLY in the polars line.
+numpy
+pandas[pyarrow]
+pyarrow
+xarray
+zarr
+numcodecs
+polars[rtcompat]
+matplotlib
+seaborn
+fastapi
+uvicorn
+uvicorn-worker
+gunicorn
+pydantic
+python-dotenv
+requests
+sqlalchemy        # update_mhw.py create_engine
+dask[array]       # update_mhw.py open_zarr / open_mfdataset(chunks=...)
+netcdf4           # update_mhw.py NetCDF-4 engine for the NOAA OISST daily files
+psycopg[binary]   # SQLAlchemy 2.1 default PostgreSQL driver (psycopg 3)

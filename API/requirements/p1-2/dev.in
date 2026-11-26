@@ -1,0 +1,7 @@
+# test/dev only (the runtime no longer imports dask/distributed since P1-1a)
+-c runtime.lock
+pytest
+psutil
+httpx
+dask[complete]
+distributed
