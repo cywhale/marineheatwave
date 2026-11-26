@@ -1,13 +1,16 @@
 #!/bin/bash
 # MHW monthly update, run by cron (50 4 18 * *).  P1-2 wrapper, 2026-11-26 (r2).
 # TEMPLATE: the production copy lives on the API host, outside this repository.
-# It is identical to this file except for the values in the config block.
+# Its executable content is identical to this file except for the config block;
+# these deployment notes (the comment lines up to the next blank comment line)
+# exist only in the template.
 # To deploy:
 #   1. copy it outside the repo, fill in the config block (absolute paths; check
 #      them on the host), keep the file private (chmod 700);
 #   2. point the crontab line at the copy.
-# Left unfilled, the placeholder API path makes it stop at `cd` with exit 11,
-# before it takes the lock, writes the log or calls anything.
+# While any of API, PM2 or PM2_HOME_DIR still contains the /path/to/ placeholder,
+# the guard at the end of the config block exits 11 before the script changes
+# directory, takes the lock, writes the log or calls anything.
 #
 # lock -> MHW preflight -> updater (API/conf/run_update_mhw.sh, P1-2 venv) ->
 # classify this run's output -> pm2 restart mhwapi ONLY after a successful append ->
@@ -41,6 +44,8 @@ CURL=/usr/bin/curl
 HEALTH_URL='https://127.0.0.1:8030/api/mhw?lon0=135&lat0=15&start=2026-01-01&end=2026-10-01'   # as bound by conf/start_app.sh
 READY_TIMEOUT=240
 READY_INTERVAL=2
+# template guard: stop before any side effect while a placeholder is left
+case "$API|$PM2|$PM2_HOME_DIR" in */path/to/*) echo "update_mhw: config block not filled in (/path/to/ placeholder)" >&2; exit 11 ;; esac
 # --- config end
 
 say() { echo "$*" | tee -a "$logg"; }
