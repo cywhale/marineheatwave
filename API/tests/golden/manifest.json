@@ -4,7 +4,7 @@
  "recorded_at": "2026-11-24T11:18:55+08:00",
  "runs": 3,
  "zarr": {
-  "path": "/Users/cywhale/backup/mhw/data/mhw.zarr@2026-10",
+  "path": "<local snapshot of the production mhw.zarr, 2026-10>",
   "zmetadata_md5": "a74ce64df2c31ef5db544530019494dd"
  },
  "env": {
@@ -30,7 +30,7 @@
   "dask_scheduler": "synchronous",
   "dask_env": [],
   "default_client": false,
-  "zarr_path": "/Users/cywhale/backup/mhw/data/mhw.zarr@2026-10",
+  "zarr_path": "<local snapshot of the production mhw.zarr, 2026-10>",
   "get_dask_client_calls": 38
  },
  "unstable": [],
@@ -2042,7 +2042,7 @@
    "what": "header evidence added; bodies, statuses and existing headers verified unchanged",
    "runs": 3,
    "commit": "c4971b1e8f3ee79c0783c6496632b78e1f2e3958",
-   "work_dir": "/Users/cywhale/backup/mhw/golden/0.2.8_amend_headers_20261124T123031",
+   "work_dir": "<golden work dir>/0.2.8_amend_headers_20261124T123031",
    "added": {
     "C01": [
      "accept-ranges",
