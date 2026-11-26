@@ -1,0 +1,27 @@
+{
+  "schema": "mhw-p2-probe/1",
+  "batch": "example-style-ab-localhost",
+  "max_requests": 26,
+  "timeout_s": 60,
+  "tls_verify": true,
+  "request_headers": {"User-Agent": "mhw-p2-probe/1"},
+  "targets": {
+    "lab": {"base_url": "http://localhost:8080/geoserver/marineheatwave/wms"}
+  },
+  "arms": {
+    "A": {"target": "lab", "extra_query": "STYLES=polygon_level"},
+    "B": {"target": "lab", "extra_query": "STYLES=polygon_level_nostroke"}
+  },
+  "cases": [
+    {
+      "id": "mhw_global_1024x512",
+      "query": "SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&FORMAT=image/png&TRANSPARENT=true&SRS=EPSG:4326&LAYERS=marineheatwave:mhw&WIDTH=1024&HEIGHT=512&BBOX=-180,-90,180,90&TIME=2026-10-01",
+      "expect": {"status": [200], "content_type": "image/png"}
+    },
+    {
+      "id": "mhw_10deg_256",
+      "query": "SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&FORMAT=image/png&TRANSPARENT=true&SRS=EPSG:4326&LAYERS=marineheatwave:mhw&WIDTH=256&HEIGHT=256&BBOX=115,15,125,25&TIME=2026-10-01"
+    }
+  ],
+  "design": {"warmup": 1, "pairs": 5, "a_reference": 0}
+}
