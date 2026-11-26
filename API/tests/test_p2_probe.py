@@ -32,6 +32,7 @@ def fake_png(w=256, h=128, pad=1000):
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     seen: list = []
+    counts: dict = {}
 
     def do_GET(self):  # noqa: N802
         type(self).seen.append(self.path)
@@ -41,6 +42,18 @@ class _Handler(BaseHTTPRequestHandler):
         if mode == "drop":
             self.close_connection = True
             return
+        if mode == "redirect":
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:1/next?SERVICE=WMS&token={SECRET}&authkey={SECRET}")
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            return
+        if "pads" in q:  # body depends on how often this exact URL was requested
+            n = type(self).counts.get(self.path, 0)
+            type(self).counts[self.path] = n + 1
+            pads = [int(x) for x in q["pads"].split(",")]
+            q["pad"] = str(pads[n % len(pads)])
         status = int(q.get("status", "200"))
         if mode == "xml":
             body, ctype = b"<ServiceExceptionReport/>", "application/vnd.ogc.se_xml"
@@ -81,6 +94,7 @@ def loopback_only(monkeypatch):
 @pytest.fixture()
 def server():
     _Handler.seen = []
+    _Handler.counts = {}
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     srv.daemon_threads = True
     srv.handle_error = lambda *a: None  # the client may close first (timeout, drop): not a test failure
@@ -228,7 +242,9 @@ def test_paired_run_differences_and_drift(server, tmp_path):
         assert abs(x["b_minus_a"] - 0.150) <= 0.015
     assert s["paired_b_minus_a"]["n"] == 4
     assert s["a_drift"]["basis"] == "a_reference" and abs(s["a_drift"]["pct"]) < 10
-    assert s["a_b_bytes_identical"] is True
+    assert s["all_pairs_same_bytes"] is True
+    assert s["pairs_compared"] == s["pairs_same_bytes"] == 4
+    assert all(x["same_bytes"] and x["a_sha256"] == x["b_sha256"] for x in s["pairs"])
     assert summ["status"] == "complete" and summ["sent"] == summ["planned"] == 2 + 1 + 8 + 1
 
 
@@ -362,3 +378,123 @@ def test_cli_plan_sends_nothing_and_run_works_in_subprocess(server, tmp_path):
                        cwd=API_DIR, capture_output=True, text=True, env=env, timeout=60)
     assert r.returncode == 0, r.stderr
     assert len(seen) == 3
+
+
+# ------------------------------------------------------------------ review fixes (Codex review of e3e927e)
+
+
+def test_byte_identity_is_per_pair_not_per_digest_set(server, tmp_path):
+    """A returns X then Y, B returns Y then X: the digest sets are equal but no pair matches."""
+    base, _ = server
+    arms = {"A": {"target": "fake", "extra_query": "pads=10,20"},
+            "B": {"target": "fake", "extra_query": "pads=20,10"}}
+    p = manifest(tmp_path, base, cases=[{"id": "swap", "query": "SERVICE=WMS"}], arms=arms,
+                 design={"warmup": 0, "pairs": 2})
+    assert probe.run(probe.load_manifest(p), tmp_path / "out", log=lambda *_: None) == 0
+    _, summ = read_run(tmp_path / "out")
+    s = summ["cases"]["swap"]
+    assert set(s["arms"]["A"]["sha256"]) == set(s["arms"]["B"]["sha256"])  # same sets ...
+    assert len(s["arms"]["A"]["sha256"]) == 2
+    assert [x["same_bytes"] for x in s["pairs"]] == [False, False]  # ... but every pair differs
+    assert s["pairs_same_bytes"] == 0 and s["pairs_compared"] == 2
+    assert s["all_pairs_same_bytes"] is False
+
+
+@pytest.mark.parametrize(
+    "where,value",
+    [
+        ("case", "SERVICE=WMS&token=abc"),
+        ("case", "SERVICE=WMS&access_token=abc"),
+        ("case", "SERVICE=WMS&API_KEY=abc"),
+        ("case", "SERVICE=WMS&authkey=abc"),
+        ("case", "SERVICE=WMS&password=abc"),
+        ("case", "SERVICE=WMS&X-Amz-Signature=abc"),
+        ("case", "SERVICE=WMS&%74oken=abc"),  # percent-encoded "token"
+        ("extra", "STYLES=a&key=abc"),
+        ("base", "?client_secret=abc"),
+        ("base", "?jsessionid=abc"),
+    ],
+)
+def test_credential_like_query_parameters_are_rejected(tmp_path, where, value):
+    base = "http://127.0.0.1:1/wms"
+    cases = [{"id": "c", "query": value if where == "case" else "SERVICE=WMS"}]
+    arms = {"A": {"target": "fake", "extra_query": value}} if where == "extra" else None
+    if where == "base":
+        base += value
+    p = manifest(tmp_path, "http://127.0.0.1:1", cases=cases, arms=arms)
+    d = json.loads(p.read_text())
+    d["targets"]["fake"]["base_url"] = base  # the full URL, including any query under test
+    p.write_text(json.dumps(d))
+    with pytest.raises(probe.ManifestError, match="credential-like query parameters"):
+        probe.load_manifest(p)
+    r = subprocess.run([sys.executable, "-m", "tools.p2.probe", "plan", str(p)], cwd=API_DIR,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == probe.EXIT_MANIFEST
+    assert "abc" not in r.stdout
+
+
+def test_ordinary_wms_parameters_are_not_treated_as_secrets():
+    for k in ("SERVICE", "VERSION", "REQUEST", "LAYERS", "STYLES", "FORMAT", "TRANSPARENT", "SRS", "CRS",
+              "BBOX", "WIDTH", "HEIGHT", "TIME", "TILED", "VIEWPARAMS", "FORMAT_OPTIONS", "EXCEPTIONS",
+              "INFO_FORMAT", "QUERY_LAYERS", "FEATURE_COUNT", "X", "Y", "I", "J", "TILEMATRIX", "TILEROW",
+              "TILECOL", "TILEMATRIXSET", "LAYER", "STYLE", "ENV", "SLD_BODY", "ELEVATION", "DIM_LEVEL"):
+        assert not probe.is_secret_key(k), k
+
+
+def test_url_valued_response_headers_are_redacted(server, tmp_path):
+    base, _ = server
+    cases = [{"id": "r", "query": "mode=redirect",
+              "expect": {"status": [302], "content_type": None, "png": False}}]
+    p = manifest(tmp_path, base, cases=cases, design={"warmup": 0, "repeats": 1})
+    assert probe.run(probe.load_manifest(p), tmp_path / "out", log=lambda *_: None) == 0
+    recs, _ = read_run(tmp_path / "out")
+    loc = dict((k.lower(), v) for k, v in recs[0]["headers"])["location"]
+    assert loc == f"http://127.0.0.1:1/next?SERVICE=WMS&token={probe.REDACTED}&authkey={probe.REDACTED}"
+    raw = (tmp_path / "out" / "requests.jsonl").read_text() + (tmp_path / "out" / "summary.json").read_text()
+    assert SECRET not in raw
+
+
+def test_redact_url_function():
+    assert probe.redact_url("https://u:p@h/x?a=1&token=t&B=2") == "https://[redacted]@h/x?a=1&token=[redacted]&B=2"
+    assert probe.redact_url("0; url=/p?sid=9&LAYERS=m") == "0; url=/p?sid=[redacted]&LAYERS=m"
+    assert probe.redact_url("/plain/path") == "/plain/path"
+
+
+@pytest.mark.parametrize(
+    "patch,msg",
+    [
+        ({"targets": {"fake": {"base_url": "http://127.0.0.1:abc/wms"}}}, "not a valid URL"),
+        ({"targets": {"fake": {"base_url": "http://127.0.0.1:70000/wms"}}}, "not a valid URL"),
+        ({"targets": {"fake": {"base_url": "http://127.0.0.1:0/wms"}}}, "port must be 1-65535"),
+        ({"targets": {"fake": {"base_url": "http://127.0.0.1:1/wms", "user": "x"}}}, "unknown field"),
+        ({"cases": [{"id": "c", "query": "x=1", "expect": [200]}]}, "expect must be an object"),
+        ({"cases": [{"id": "c", "query": "x=1", "expect": {"status": ["200"]}}]}, "HTTP status codes"),
+        ({"cases": [{"id": "c", "query": "x=1", "expect": {"status": [700]}}]}, "HTTP status codes"),
+        ({"cases": [{"id": "c", "query": "x=1", "expect": {"png": "yes"}}]}, "png must be true or false"),
+        ({"cases": [{"id": "c", "query": "x=1", "expect": {"content_type": 5}}]}, "content_type"),
+        ({"cases": [{"id": "c", "query": "x=1", "expect": {"stauts": [200]}}]}, "unknown field"),
+        ({"cases": [{"id": "../c", "query": "x=1"}]}, "safe|id must match"),
+        ({"cases": [{"id": "c", "query": ""}]}, "non-empty raw query"),
+        ({"cases": [{"id": "c", "query": "x=1", "note": "typo"}]}, "unknown field"),
+        ({"timeout_s": 0}, "finite number greater than 0"),
+        ({"timeout_s": float("inf")}, "finite number greater than 0"),
+        ({"timeout_s": True}, "timeout_s"),
+        ({"request_headers": {"X-A": "1\r\nX-B: 2"}}, "invalid name or value"),
+        ({"arms": {"A": {"target": "fake", "extra_query": 5}}}, "extra_query must be a string"),
+        ({"design": {"warmup": 1, "repeats": 2, "pairs": 3}}, "apply only to paired"),
+        ({"design": {"warmup": 1, "repeat": 2}}, "unknown field"),
+        ({"maxrequests": 5}, "unknown field"),
+        ({"batch": " "}, "must not be empty"),
+    ],
+)
+def test_malformed_manifests_fail_at_plan_time_without_traceback(tmp_path, patch, msg):
+    d = json.loads(manifest(tmp_path, "http://127.0.0.1:1", cases=[{"id": "c", "query": "x=1"}]).read_text())
+    d.update(patch)
+    p = tmp_path / "bad.json"
+    p.write_text(json.dumps(d))
+    with pytest.raises(probe.ManifestError, match=msg):
+        probe.load_manifest(p)
+    r = subprocess.run([sys.executable, "-m", "tools.p2.probe", "plan", str(p)], cwd=API_DIR,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == probe.EXIT_MANIFEST
+    assert "Traceback" not in r.stderr and "manifest error:" in r.stderr

@@ -18,14 +18,22 @@ Rules the tool enforces:
   error, timeout, unexpected status/content type, invalid PNG, short body)
   stops the batch; the failure is recorded as such and the exit code is 2.
 - Records keep what interpretation needs (timings, status, all response
-  headers, body size, SHA-256) and redact cookies and authorization headers.
-  Manifests with credentials (URL userinfo, auth/cookie request headers) are
+  headers, body size, SHA-256).  Cookie and authorization headers are redacted,
+  and URL-valued headers (Location etc.) have credential-like query values
+  redacted.  Manifests with credentials (URL userinfo, credential-like query
+  parameters such as token/api_key/authkey, auth/cookie request headers) are
   rejected.
+- The tool never purges or seeds a cache; a request that misses a cache may
+  still leave an entry there (a property of the target, part of the batch's
+  approval).
 
 Timings (seconds, ``time.perf_counter`` relative to the request start):
-``connect`` (TCP, and TLS for https), ``first_byte`` (the socket became readable
-after the request was sent), ``headers`` (status line and headers parsed) and
-``total`` (whole body received).
+``connect`` (name resolution + TCP connect + TLS handshake for https),
+``first_byte`` (the socket became readable after the request was sent),
+``headers`` (status line and headers parsed) and ``total`` (whole body received).
+Every request uses a new connection (no keep-alive), so these are times of
+independent requests; a browser that reuses connections will see less
+connection overhead.
 
 Exit codes: 0 complete, 2 stopped on a failed request, 3 invalid manifest or over
 the cap, 4 output directory not empty.
@@ -36,6 +44,8 @@ import argparse
 import hashlib
 import http.client
 import json
+import math
+import re
 import select
 import socket
 import ssl
@@ -46,7 +56,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
 
 SCHEMA = "mhw-p2-probe/1"
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
@@ -56,6 +66,15 @@ REDACTED = "[redacted]"
 SECRET_RESPONSE_HEADERS = {"set-cookie", "set-cookie2", "authorization", "proxy-authorization", "cookie"}
 # Request headers a manifest may not carry (the record must not contain secrets).
 FORBIDDEN_REQUEST_HEADERS = {"authorization", "proxy-authorization", "cookie", "x-api-key", "x-auth-token"}
+# Query-parameter names treated as credentials: rejected in manifests, and their
+# values are redacted in URL-valued response headers (Location etc.).  GeoServer's
+# authkey module uses "authkey".
+SECRET_QUERY_KEYS = {"key", "auth", "authkey", "apikey", "api_key", "sig", "signature", "pwd", "passwd",
+                     "password", "session", "sessionid", "jsessionid", "sid", "code", "credential", "credentials"}
+SECRET_QUERY_PARTS = ("token", "secret", "password", "passwd", "apikey", "api_key", "authkey", "signature", "session")
+# Response headers whose value is a URL: written with credential-like query values redacted.
+URL_RESPONSE_HEADERS = {"location", "content-location", "refresh", "link"}
+CASE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 EXIT_OK, EXIT_STOPPED, EXIT_MANIFEST, EXIT_OUTDIR = 0, 2, 3, 4
 
@@ -122,49 +141,124 @@ def _req(d: dict, key: str, typ, where: str):
     return v
 
 
-def _check_query(q: str, where: str) -> str:
+def _only(d: dict, allowed: set[str], where: str) -> None:
+    extra = sorted(set(d) - allowed)
+    if extra:
+        raise ManifestError(f"{where}: unknown field(s) {extra}")
+
+
+def _nonneg_int(v, where: str) -> int:
+    if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+        raise ManifestError(f"{where} must be a non-negative integer")
+    return v
+
+
+def is_secret_key(name: str) -> bool:
+    """True for a query-parameter name that looks like a credential."""
+    n = unquote(name).strip().lower().replace("-", "_")
+    return n in SECRET_QUERY_KEYS or any(part in n for part in SECRET_QUERY_PARTS)
+
+
+def _secret_keys_in_query(q: str) -> list[str]:
+    return sorted({k for k, _ in parse_qsl(q, keep_blank_values=True) if is_secret_key(k)})
+
+
+_QUERY_PAIR = re.compile(r"([?&;])([^=&#;\s]+)=([^&#;\s]*)")
+_USERINFO = re.compile(r"(?i)\b(https?://)[^/@\s]+@")
+
+
+def redact_url(text: str) -> str:
+    """`text` (a URL, or a header value containing URLs) with URL user info and the
+    values of credential-like query parameters replaced by [redacted]."""
+    text = _USERINFO.sub(lambda m: m.group(1) + REDACTED + "@", text)
+    return _QUERY_PAIR.sub(lambda m: m.group(1) + m.group(2) + "=" + (REDACTED if is_secret_key(m.group(2)) else m.group(3)), text)
+
+
+def _check_query(q, where: str) -> str:
     if not isinstance(q, str):
         raise ManifestError(f"{where}: query must be a string")
-    if any(c.isspace() for c in q) or "#" in q or q.startswith(("?", "&")):
-        raise ManifestError(f"{where}: query must be a raw query string without whitespace, '#' or a leading ?/&")
+    if not q or any(c.isspace() for c in q) or "#" in q or q.startswith(("?", "&")):
+        raise ManifestError(f"{where}: query must be a non-empty raw query string without whitespace, '#' or a leading ?/&")
+    bad = _secret_keys_in_query(q)
+    if bad:
+        raise ManifestError(f"{where}: credential-like query parameters are not allowed: {bad}")
     return q
 
 
 def _check_base_url(u: str, where: str) -> str:
-    p = urlsplit(u)
+    if any(c.isspace() for c in u) or "#" in u:
+        raise ManifestError(f"{where}: base_url must not contain whitespace or a fragment")
+    try:
+        p = urlsplit(u)
+        port = p.port  # raises ValueError for a non-numeric or out-of-range port
+    except ValueError as e:
+        raise ManifestError(f"{where}: base_url is not a valid URL ({e})") from None
     if p.scheme not in ("http", "https") or not p.hostname:
         raise ManifestError(f"{where}: base_url must be an absolute http(s) URL")
+    if port == 0:
+        raise ManifestError(f"{where}: base_url port must be 1-65535")
     if p.username is not None or p.password is not None:
         raise ManifestError(f"{where}: credentials in the URL are not allowed")
-    if p.fragment or any(c.isspace() for c in u):
-        raise ManifestError(f"{where}: base_url must not contain a fragment or whitespace")
+    bad = _secret_keys_in_query(p.query)
+    if bad:
+        raise ManifestError(f"{where}: credential-like query parameters are not allowed: {bad}")
     return u
 
 
+def _check_expect(exp, where: str) -> tuple[tuple[int, ...], str | None, bool]:
+    if exp is None:
+        exp = {}
+    if not isinstance(exp, dict):
+        raise ManifestError(f"{where}.expect must be an object")
+    _only(exp, {"status", "content_type", "png"}, f"{where}.expect")
+    status = exp.get("status", [200])
+    if (not isinstance(status, list) or not status
+            or not all(isinstance(s, int) and not isinstance(s, bool) and 100 <= s <= 599 for s in status)):
+        raise ManifestError(f"{where}.expect.status must be a non-empty list of HTTP status codes (100-599)")
+    ctype = exp.get("content_type", "image/png")
+    if ctype is not None and (not isinstance(ctype, str) or not ctype.strip()):
+        raise ManifestError(f"{where}.expect.content_type must be a non-empty string or null")
+    png = exp.get("png", ctype == "image/png")
+    if not isinstance(png, bool):
+        raise ManifestError(f"{where}.expect.png must be true or false")
+    return tuple(status), ctype, png
+
+
 def load_manifest(path: Path, max_requests_override: int | None = None) -> Manifest:
+    """Validate everything up front, so that `plan` catches every input error and
+    `run` never fails on the manifest half-way through a batch."""
     raw = Path(path).read_bytes()
     try:
         d = json.loads(raw)
-    except json.JSONDecodeError as e:
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise ManifestError(f"manifest is not valid JSON: {e}") from None
     if not isinstance(d, dict) or d.get("schema") != SCHEMA:
         raise ManifestError(f"manifest 'schema' must be '{SCHEMA}'")
+    _only(d, {"schema", "batch", "max_requests", "timeout_s", "tls_verify", "request_headers",
+              "targets", "arms", "cases", "design"}, "manifest")
     batch = _req(d, "batch", str, "manifest")
+    if not batch.strip():
+        raise ManifestError("'batch' must not be empty")
     cap = max_requests_override if max_requests_override is not None else d.get("max_requests")
     if cap is None:
         raise ManifestError("the batch request cap is required: set 'max_requests' or pass --max-requests")
     if not isinstance(cap, int) or isinstance(cap, bool) or cap < 1:
         raise ManifestError("the batch request cap must be a positive integer")
     timeout = _req(d, "timeout_s", (int, float), "manifest")
-    if isinstance(timeout, bool) or timeout <= 0:
-        raise ManifestError("'timeout_s' must be a positive number")
+    if isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
+        raise ManifestError("'timeout_s' must be a finite number greater than 0")
     tls_verify = d.get("tls_verify", True)
     if not isinstance(tls_verify, bool):
         raise ManifestError("'tls_verify' must be true or false")
 
-    headers = d.get("request_headers", {}) or {}
+    headers = d.get("request_headers", {})
+    if headers is None:
+        headers = {}
     if not isinstance(headers, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in headers.items()):
         raise ManifestError("'request_headers' must map strings to strings")
+    for k, v in headers.items():
+        if not k or any(c in k for c in ":\r\n") or any(c.isspace() for c in k) or "\r" in v or "\n" in v:
+            raise ManifestError(f"request header {k!r} has an invalid name or value")
     bad = sorted(k for k in headers if k.lower() in FORBIDDEN_REQUEST_HEADERS)
     if bad:
         raise ManifestError(f"request headers carrying credentials are not allowed: {bad}")
@@ -177,6 +271,7 @@ def load_manifest(path: Path, max_requests_override: int | None = None) -> Manif
         where = f"targets.{name}"
         if not isinstance(t, dict):
             raise ManifestError(f"{where} must be an object")
+        _only(t, {"base_url"}, where)
         base[name] = _check_base_url(_req(t, "base_url", str, where), where)
 
     arms_d = _req(d, "arms", dict, "manifest")
@@ -188,10 +283,15 @@ def load_manifest(path: Path, max_requests_override: int | None = None) -> Manif
         where = f"arms.{name}"
         if not isinstance(a, dict):
             raise ManifestError(f"{where} must be an object")
+        _only(a, {"target", "extra_query"}, where)
         tgt = _req(a, "target", str, where)
         if tgt not in base:
             raise ManifestError(f"{where}: unknown target '{tgt}'")
         extra = a.get("extra_query", "")
+        if extra is None:
+            extra = ""
+        if not isinstance(extra, str):
+            raise ManifestError(f"{where}: extra_query must be a string")
         if extra:
             _check_query(extra, where)
         arms[name] = Arm(name, tgt, base[tgt], extra)
@@ -204,34 +304,34 @@ def load_manifest(path: Path, max_requests_override: int | None = None) -> Manif
         where = f"cases[{i}]"
         if not isinstance(c, dict):
             raise ManifestError(f"{where} must be an object")
+        _only(c, {"id", "query", "expect"}, where)
         cid = _req(c, "id", str, where)
+        if not CASE_ID.fullmatch(cid):
+            raise ManifestError(f"{where}: id must match {CASE_ID.pattern} (it is used in file names)")
         if cid in seen:
             raise ManifestError(f"{where}: duplicate id '{cid}'")
         seen.add(cid)
         q = _check_query(_req(c, "query", str, where), where)
-        exp = c.get("expect", {}) or {}
-        status = exp.get("status", [200])
-        if not isinstance(status, list) or not status or not all(isinstance(s, int) for s in status):
-            raise ManifestError(f"{where}: expect.status must be a non-empty list of integers")
-        ctype = exp.get("content_type", "image/png")
-        png = exp.get("png", ctype == "image/png")
-        cases.append(Case(cid, q, tuple(status), ctype, bool(png)))
+        status, ctype, png = _check_expect(c.get("expect", {}), where)
+        cases.append(Case(cid, q, status, ctype, png))
 
     design = _req(d, "design", dict, "manifest")
-    warmup = design.get("warmup", 1)
-    a_ref = design.get("a_reference", 0)
+    _only(design, {"warmup", "pairs", "repeats", "a_reference"}, "design")
     paired = "B" in arms
-    pairs = design.get("pairs", 0) if paired else 0
-    repeats = design.get("repeats", 0) if not paired else 0
-    for k, v in (("warmup", warmup), ("a_reference", a_ref), ("pairs", pairs), ("repeats", repeats)):
-        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
-            raise ManifestError(f"design.{k} must be a non-negative integer")
-    if paired and pairs < 1:
-        raise ManifestError("design.pairs must be >= 1 when arm B is present")
-    if not paired and repeats < 1:
-        raise ManifestError("design.repeats must be >= 1 for a single-arm (series) batch")
-    if not paired and a_ref:
-        raise ManifestError("design.a_reference applies only to paired batches")
+    warmup = _nonneg_int(design.get("warmup", 1), "design.warmup")
+    a_ref = _nonneg_int(design.get("a_reference", 0), "design.a_reference")
+    pairs = _nonneg_int(design.get("pairs", 0), "design.pairs")
+    repeats = _nonneg_int(design.get("repeats", 0), "design.repeats")
+    if paired:
+        if pairs < 1:
+            raise ManifestError("design.pairs must be >= 1 when arm B is present")
+        if repeats:
+            raise ManifestError("design.repeats is for single-arm batches; use design.pairs")
+    else:
+        if repeats < 1:
+            raise ManifestError("design.repeats must be >= 1 for a single-arm (series) batch")
+        if pairs or a_ref:
+            raise ManifestError("design.pairs and design.a_reference apply only to paired (A/B) batches")
 
     m = Manifest(batch, cap, float(timeout), tls_verify, dict(headers), arms, cases,
                  warmup, pairs, repeats, a_ref, hashlib.sha256(raw).hexdigest())
@@ -279,7 +379,15 @@ def build_url(arm: Arm, case: Case) -> str:
 
 
 def redact_headers(items: list[tuple[str, str]]) -> list[list[str]]:
-    return [[k, REDACTED if k.lower() in SECRET_RESPONSE_HEADERS else v] for k, v in items]
+    out = []
+    for k, v in items:
+        kl = k.lower()
+        if kl in SECRET_RESPONSE_HEADERS:
+            v = REDACTED
+        elif kl in URL_RESPONSE_HEADERS:
+            v = redact_url(v)
+        out.append([k, v])
+    return out
 
 
 def png_size(body: bytes) -> tuple[int, int] | None:
@@ -294,7 +402,7 @@ def fetch(url: str, *, timeout_s: float, headers: dict[str, str], tls_verify: bo
     p = urlsplit(url)
     host, port = p.hostname, p.port
     path = (p.path or "/") + (f"?{p.query}" if p.query else "")
-    rec: dict = {"url": url, "started_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+    rec: dict = {"url": redact_url(url), "started_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
                  "t": {}, "status": None, "reason": None, "headers": [], "body_bytes": 0,
                  "sha256": None, "error": None}
     deadline = None
@@ -441,23 +549,34 @@ def summarize(m: Manifest, records: list[dict]) -> dict:
             }
         entry = {"arms": per_arm}
         if "B" in m.arms:
-            pairs = {}
+            pairs: dict[int, dict] = {}
             for r in timed:
                 if r["phase"] == "pair":
-                    pairs.setdefault(r["pair"], {})[r["arm"]] = r["t"]["total"]
-            diffs = [{"pair": i, "order": "AB" if i % 4 in (0, 3) else "BA", "A": p["A"], "B": p["B"],
-                      "b_minus_a": p["B"] - p["A"], "b_over_a": p["B"] / p["A"] if p["A"] else None}
-                     for i, p in sorted(pairs.items()) if "A" in p and "B" in p]
-            d = [x["b_minus_a"] for x in diffs]
+                    pairs.setdefault(r["pair"], {})[r["arm"]] = r
+            diffs = []
+            for i, p in sorted(pairs.items()):
+                if "A" not in p or "B" not in p:
+                    continue  # a pair cut short by a failure
+                a, b = p["A"], p["B"]
+                diffs.append({"pair": i, "order": "AB" if i % 4 in (0, 3) else "BA",
+                              "A": a["t"]["total"], "B": b["t"]["total"],
+                              "b_minus_a": b["t"]["total"] - a["t"]["total"],
+                              "b_over_a": b["t"]["total"] / a["t"]["total"] if a["t"]["total"] else None,
+                              "a_sha256": a["sha256"], "b_sha256": b["sha256"],
+                              "same_bytes": a["sha256"] == b["sha256"]})
             entry["pairs"] = diffs
-            entry["paired_b_minus_a"] = _stats(d)
+            entry["paired_b_minus_a"] = _stats([x["b_minus_a"] for x in diffs])
             a_order = [r["t"]["total"] for r in timed if r["arm"] == "A" and r["phase"] == "pair"]
             entry["a_drift"] = drift(
                 a_order,
                 [r["t"]["total"] for r in timed if r["phase"] == "a_ref_before"],
                 [r["t"]["total"] for r in timed if r["phase"] == "a_ref_after"],
             )
-            entry["a_b_bytes_identical"] = bool(per_arm["A"]["sha256"]) and per_arm["A"]["sha256"] == per_arm["B"]["sha256"]
+            # Compared pair by pair (same pair index), never as sets of digests: A
+            # returning X, Y and B returning Y, X is two mismatches, not "identical".
+            entry["pairs_compared"] = len(diffs)
+            entry["pairs_same_bytes"] = sum(x["same_bytes"] for x in diffs)
+            entry["all_pairs_same_bytes"] = bool(diffs) and all(x["same_bytes"] for x in diffs)
         else:
             entry["a_drift"] = drift([r["t"]["total"] for r in timed if r["phase"] == "repeat"])
         out[c.id] = entry
@@ -545,7 +664,7 @@ def main(argv: list[str] | None = None) -> int:
         for st in m.plan:
             arm = m.arms[st.arm]
             case = next(c for c in m.cases if c.id == st.case)
-            print(f"{st.seq:4d} {st.case} {st.arm} {st.phase} pair={st.pair} {build_url(arm, case)}")
+            print(f"{st.seq:4d} {st.case} {st.arm} {st.phase} pair={st.pair} {redact_url(build_url(arm, case))}")
         return EXIT_OK
     rc = run(m, a.out, save_bodies=a.save_bodies)
     if rc == EXIT_OUTDIR:

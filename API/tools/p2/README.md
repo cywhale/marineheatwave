@@ -2,8 +2,10 @@
 
 A small, dependency-free (standard library only) tool for timing a fixed list of
 WMS/HTTP requests against one or two endpoints, with an optional paired A/B
-design. It is a measurement tool only: it does not change any server, cache or
-client.
+design. It is a measurement tool only. It changes no server setting or client,
+and it never purges or seeds a cache. The requests themselves are ordinary
+requests, though: one that misses a cache (nginx, GeoWebCache) may leave a new
+entry there, and that side effect must be part of the batch's approval.
 
 Stage 0 covers only the tool and its local tests (`tests/test_p2_probe.py`,
 which use a local fake HTTP server). Running it against a real GeoServer is a
@@ -57,11 +59,21 @@ Exit codes:
   that misses a cache may add an entry there; that is a property of the target,
   and must be part of the batch's approval.
 - **Secrets.**
-  - Manifests with credentials are rejected: a user name or password in a URL,
-    or `Authorization`, `Proxy-Authorization`, `Cookie`, `X-Api-Key` or
-    `X-Auth-Token` request headers.
+  - Manifests with credentials are rejected:
+    - a user name or password in a URL;
+    - a credential-like query parameter in `base_url`, a case `query` or an
+      arm's `extra_query`: names such as `key`, `auth`, `authkey` (GeoServer's
+      authkey module), `apikey`/`api_key`, `sig`/`signature`, `password`,
+      `session`/`sessionid`/`sid`, or any name containing `token`, `secret`,
+      `password`, `signature` or `session`;
+    - `Authorization`, `Proxy-Authorization`, `Cookie`, `X-Api-Key` or
+      `X-Auth-Token` request headers.
   - `Set-Cookie` and other cookie or authorization response headers are written
     as `[redacted]`.
+  - URL-valued response headers (`Location`, `Content-Location`, `Refresh`,
+    `Link`) are kept, but with URL user info and the values of credential-like
+    query parameters replaced by `[redacted]`. The same redaction is applied to
+    the recorded request URL and to the URLs `plan` prints.
 
 ## Timings
 
@@ -70,10 +82,15 @@ each request:
 
 | Field | Meaning |
 |---|---|
-| `connect` | TCP connect (plus TLS handshake for https) finished |
+| `connect` | name resolution (DNS) + TCP connect + TLS handshake for https, finished |
 | `first_byte` | the socket became readable after the request was sent (first response byte) |
 | `headers` | status line and headers parsed |
 | `total` | complete body received |
+
+Each request opens a new connection (no keep-alive), so the times are those
+of independent requests, including name resolution and connection setup. A
+browser that reuses connections sees less of that overhead; interpret
+browser-perceived latency separately.
 
 ## Design
 
@@ -97,7 +114,14 @@ each request:
 
 ## Manifest format (`schema: mhw-p2-probe/1`)
 
-See [`example_manifest.json`](example_manifest.json). It uses a `localhost`
+See [`example_manifest.json`](example_manifest.json). The manifest is validated completely before
+anything is sent, so `plan` reports every input error:
+- unknown fields;
+- wrong types;
+- invalid URLs or ports;
+- a non-finite or non-positive timeout;
+- a malformed `expect`;
+- a case id that is not a safe file name. It uses a `localhost`
 placeholder; replace it with a real target only in a manifest kept outside the
 repository.
 
@@ -111,7 +135,7 @@ repository.
 | `request_headers` | no | extra request headers; credentials are rejected |
 | `targets` | yes | name → `{"base_url": "http(s)://host[:port]/path"}` |
 | `arms` | yes | `{"A": {...}}` or `{"A": {...}, "B": {...}}`; each is `{"target": name, "extra_query": "K=V&..."}` |
-| `cases` | yes | list of `{"id", "query", "expect"}`, where `expect` defaults to `{"status": [200], "content_type": "image/png", "png": true}` |
+| `cases` | yes | list of `{"id", "query", "expect"}`; `id` matches `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`; `expect` defaults to `{"status": [200], "content_type": "image/png", "png": true}` (`content_type` may be `null`) |
 | `design` | yes | `warmup`, then `pairs` (paired) or `repeats` (single arm), and optionally `a_reference` (paired only) |
 
 ## Output (`--out DIR`)
@@ -131,8 +155,11 @@ repository.
   - per case:
     - per arm: median, min and max of `total`, `headers` and `first_byte`; the
       distinct SHA-256 values and body sizes; the cache-related headers seen;
-    - for paired batches: every pair with B − A and B/A, the paired difference
-      statistics, `a_drift`, and whether A and B returned identical bytes.
+    - for paired batches: every pair with B − A, B/A and both SHA-256 values
+      (`same_bytes`); the paired difference statistics; `a_drift`; and the byte
+      comparison counted pair by pair (`pairs_compared`, `pairs_same_bytes`,
+      `all_pairs_same_bytes`). Digests are compared within each pair, never as
+      sets: A returning X, Y while B returns Y, X counts as two mismatches.
 - **`bodies/`:** written only with `--save-bodies`.
 
 Real manifests (with internal endpoints) and run outputs must not be committed.
