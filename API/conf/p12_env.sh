@@ -1,6 +1,6 @@
 # Sourced by conf/start_app.sh (API) and conf/run_update_mhw.sh (monthly updater):
 # both use ONE uv venv built from requirements/p1-2/runtime.lock (owner 2026-11-25;
-# doc 29 r5 D1).  In production since 2026-11-25 (v0.3.0).
+# doc 29 r5 D1).  In production since 2026-11-25.
 #
 # MHW_VENV: the default below is the production venv path; an explicit MHW_VENV
 # in the environment wins.

@@ -1,4 +1,4 @@
-// PM2 app for the MHW API, P1-2 (doc 29 r5 D2).  In production since 2026-11-25 (v0.3.0).
+// PM2 app for the MHW API, P1-2 (doc 29 r5 D2).  In production since 2026-11-25.
 // Only mhwapi: the shared Dask PM2 services are not managed here.
 module.exports = {
   apps: [

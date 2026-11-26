@@ -1,8 +1,8 @@
 # v0.3.0 (draft): Phase 1 core milestone — API performance and runtime environment
 
-Status: **draft, not tagged.** Date of the summary: 2026-11-26.
+Status: **draft, not tagged.** Date of the summary: 2026-11-26. The changes below have been in production since 2026-11-25; the version number v0.3.0 is planned and not yet released.
 
-v0.3.0 completes the core of Phase 1 of the MHW improvement roadmap:
+The planned v0.3.0 covers the core of Phase 1 of the MHW improvement roadmap:
 - the API code fixes that keep outputs unchanged (P1-0 and P1-1);
 - the new runtime environment (P1-2).
 
@@ -41,8 +41,8 @@ Runtime (P1-2):
 
 | Check | Result |
 |---|---|
-| Golden data cases on production (17 JSON/CSV cases) | Status, headers and body sha256 identical to the golden set, after both the P1-1 and the P1-2 switch |
-| CSV crossing 180 degrees (J08), Range requests, PNG | J08 identical to the P1-1 output; Range 206/400 identical, 416 see §4; plot is a 1200×800 PNG |
+| Golden data cases on production (17 JSON/CSV cases) | Status, headers and body sha256 identical to the golden set, after both the P1-1 and the P1-2 switch. The golden set records the 0.2.8 behaviour, so "identical" means *unchanged*, not necessarily *correct* (J08, §4) |
+| CSV for the 180-degree case (J08), Range requests, PNG | The J08 CSV equals the output of the P1-1 candidate; it was **not** compared with a 0.2.8 CSV golden (the J08 golden is JSON). Range 206/400 identical, 416 see §4; plot is a 1200×800 PNG |
 | Concurrency 1/2/4 (production loopback) | All requests 200 |
 | Single-point latency (production loopback, warm, median) | About 3.0 s before Phase 1 → 0.093 s with P1-1 on the old environment → **0.121 s** with P1-2 |
 | P1-2 vs old environment (paired, 30 rounds, interleaved) | New environment **about +32 ms slower** (95% CI upper bound about +33 ms). The old environment was measured as an isolated single-worker plain-HTTP candidate, so TLS and worker count differ from production. Within the **provisional** limits (median ≤ 0.3 s; CI upper bound ≤ +50 ms); the owner has **not** formally adopted these limits |
@@ -54,7 +54,11 @@ Runtime (P1-2):
 
 - **CSV Range 416.** The response's `Content-Range` is now `bytes */<size>`, the Starlette 1.x format. The owner accepted this.
 - **PNG plots** are verified by format and size, not by bytes (owner decision for the new library versions).
-- **Dateline.** A query crossing 180 degrees still needs two API calls, as in existing workshop material. This was deliberately not changed in Phase 1.
+- **Dateline: known bug, not fixed.**
+  - A single bounding-box query crossing 180 degrees (golden case J08: `lon0=170&lon1=-170`) currently returns the **wrong range**: the 340-degree complement instead of the 20-degree box.
+  - Because that area is larger, the requested period is also cut (24 months requested, 12 returned).
+  - Workshop users work around this with two queries, one on each side of 180 degrees.
+  - Phase 1 deliberately kept this behaviour unchanged: the J08 JSON golden records this wrong output, and the J08 CSV was only shown to equal the P1-1 candidate's output.
 - **`lon0=0`.** A query with `lon0=0` is treated as crossing 0 degrees and reads the data twice: the output is correct but costs more. This is a P1-4 candidate.
 - **Shared Dask services.** They stay running for other users; the MHW API and updater no longer need them. Whether to keep them is not an MHW decision.
 
@@ -98,7 +102,7 @@ The wrapper is tested with fakes and one controlled restart, but **the first rea
 4. Cron wrapper in version control. Proposal: replace the `API/update_mhw.sh` symlink with a parameterised template (paths and health URL as variables at the top), copied from the verified r2 wrapper, which contains host paths but no secrets. This needs owner approval.
 5. Reboot recovery check (PM2 resurrect with the new app), postponed.
 6. When to retire the pre-Phase-1 Python environment, which the rollback script still uses.
-7. Move `conf/simu.sh` (local development) from `requirements.txt` + local Dask to the uv locks; see [`README.md`](../README.md#development-and-deployment-maintainers). A small separate change.
+7. `conf/simu.sh` must not be run as it is (it pip-installs into the current Python, kills processes by name and calls `pm2 start`); see [`README.md`](../README.md#development-and-deployment-maintainers). Moving it to the uv locks would be a small separate change.
 
 ## 7. Next: P2-0
 

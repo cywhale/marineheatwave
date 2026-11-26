@@ -1,8 +1,8 @@
-# MHW API dependency locks (current, since v0.3.0)
+# MHW API dependency locks (current)
 
-These files are the **official dependency set** of the MHW API. Production has used them since 2026-11-25.
+These files are the **official dependency set** of the MHW API. Production has used them since 2026-11-25; they are planned to ship as v0.3.0, which is not tagged yet.
 - One uv venv serves both the API (`mhw_app.py`) and the monthly updater (`update_mhw.py`).
-- The older `../../requirements.txt` and `../../Pipfile` belong to the pre-v0.3.0 environment. They are kept unchanged for reference and the legacy `conf/simu.sh`; they are **not** current.
+- The older `../../requirements.txt` and `../../Pipfile` belong to the environment used before 2026-11-25. They are kept unchanged for reference and the legacy `conf/simu.sh`; they are **not** current.
 
 ## Files
 

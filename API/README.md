@@ -81,7 +81,7 @@ Marine heatwaves (MHWs) evaluated from 0.25-degree gridded NOAA OISST v2.1
     - `dev.lock`: tests, installed together with `runtime.lock`
     - `tools.lock`: benchmark/check runners only
 - `runtime.lock` contains `dask[array]` because the updater (`update_mhw.py`) reads data through xarray with Dask chunks. The API itself reads the zarr store without Dask and does **not** use a shared Dask scheduler.
-- `requirements.txt` and `Pipfile` are the **legacy** pre-v0.3.0 pins (Python 3.11, zarr 2, dask/distributed 2025.3). They are kept unchanged for reference and are not used by production.
+- `requirements.txt` and `Pipfile` are the **legacy** pins used before 2026-11-25 (Python 3.11, zarr 2, dask/distributed 2025.3). They are kept unchanged for reference and are not used by production.
 
 ###### Production layout
 
@@ -90,10 +90,11 @@ Marine heatwaves (MHWs) evaluated from 0.25-degree gridded NOAA OISST v2.1
 
 ###### Local development (legacy script)
 
-- `conf/simu.sh` is the **old** local-development path and has not been migrated to the uv locks:
-    - it `pip install`s `requirements.txt` into the current Python;
-    - it starts a local Dask scheduler and worker on loopback, which the current API no longer needs;
-    - it lists further commands: gunicorn with TLS files and `--reload`, process clean-up, and `pm2 start ./conf/ecosystem.config.js` (whose `cwd` is the production path).
-- Treat it as a list of reference commands; never run it on shared or production hosts.
+- **Do not run `conf/simu.sh`.** It is the old local-development script, not migrated to the uv locks, and it is kept only as a record of the old commands. Run as a whole, on any machine including your own, it:
+    - `pip install`s `requirements.txt` into whatever Python is current, changing that environment;
+    - starts a local Dask scheduler and worker, which the current API no longer needs;
+    - starts gunicorn with TLS files and `--reload`;
+    - then `kill -9`s every process whose command line matches `mhw_app`, `dask scheduler` or `dask worker`, which can include unrelated processes;
+    - and runs `pm2 start ./conf/ecosystem.config.js`, whose `cwd` is the production path.
 - For a current local setup, create a venv from `requirements/p1-2/` (runtime + dev) and run `pytest` in `API/`.
 - Moving `simu.sh` to the uv locks (without Dask) is proposed as a small separate change; not decided yet.
