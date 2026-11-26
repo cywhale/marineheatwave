@@ -1,8 +1,9 @@
 # Sourced by conf/start_app.sh (API) and conf/run_update_mhw.sh (monthly updater):
-# both use ONE uv venv (owner 2026-11-25; doc 29 r5 D1).  Not deployed yet (V-d).
+# both use ONE uv venv built from requirements/p1-2/runtime.lock (owner 2026-11-25;
+# doc 29 r5 D1).  In production since 2026-11-25 (v0.3.0).
 #
-# MHW_VENV: location still to be confirmed by the owner (doc 29 r5 §6 item 2);
-# an explicit MHW_VENV in the environment wins.
+# MHW_VENV: the default below is the production venv path; an explicit MHW_VENV
+# in the environment wins.
 : "${MHW_VENV:=/home/odbadmin/venvs/mhw-p12}"
 export MHW_VENV
 # polars[rtcompat] installs the "compat" runtime; force it so a missing compat

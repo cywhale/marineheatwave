@@ -1,28 +1,69 @@
-# P1-2 dependency set (official for the P1-2 environment; doc 29 r5 §3)
+# MHW API dependency locks (current, since v0.3.0)
 
-One uv venv for the API **and** the monthly updater (`update_mhw.py`), owner
-decision 2026-11-25. The older `../../requirements.txt` and `../../Pipfile` are
-kept unchanged for the pre-P1-2 environment; they are **not** the P1-2 lock.
+These files are the **official dependency set** of the MHW API. Production has used them since 2026-11-25.
+- One uv venv serves both the API (`mhw_app.py`) and the monthly updater (`update_mhw.py`).
+- The older `../../requirements.txt` and `../../Pipfile` belong to the pre-v0.3.0 environment. They are kept unchanged for reference and the legacy `conf/simu.sh`; they are **not** current.
 
-| file | role | sha256 |
+## Files
+
+| file | used for | sha256 (`SHA256SUMS`) |
 |---|---|---|
-| `runtime.in` | production input: API set + updater set (`sqlalchemy`, `dask[array]`, `netcdf4`, `psycopg[binary]`); polars as `polars[rtcompat]` | `623aaab8…41802` |
-| `runtime.lock` | **production lock** (hashes, universal), 56 packages | `73d273ce…6d952d27` |
-| `dev.in` / `dev.lock` | tests only (`-c runtime.lock`): pytest, psutil, httpx, dask[complete], distributed | `7b8dcae5…` / `451f225e…cfd63a77` |
-| `tools.in` / `tools.lock` | benchmark runner only (`tools/bench`, `tools/p1_2`): psutil, httpx | `677eb367…` / `60d5704f…bf446e` |
+| `runtime.in` → `runtime.lock` | **Production**: the API plus the updater's packages (`sqlalchemy`, `psycopg[binary]`, `dask[array]`, `netcdf4`). 56 packages | `623aaab8…` → `73d273ce…` |
+| `dev.in` → `dev.lock` | **Tests only**, installed together with `runtime.lock`: pytest, psutil, httpx, `dask[complete]`, `distributed`. Constrained by the runtime pins (`-c runtime.lock`); all packages the two locks share have the same versions | `7b8dcae5…` → `451f225e…` |
+| `tools.in` → `tools.lock` | **Benchmark and check runners only** (`tools/bench`, `tools/p1_2`): psutil, httpx. A separate small venv, never the API's | `677eb367…` → `60d5704f…` |
 
-Provenance (no re-resolution in this commit):
-- **`runtime.in` / `runtime.lock`** are byte-identical copies of V-c's `prod-B.in` / `prod-B.lock`, which is why the lock's header still names `prod-B.*`. That lock was installed on vm24 and validated in V-c (doc 28 r4 §9).
-- **`dev.in` / `dev.lock`** are byte-identical to V-a, which ran full pytest on the Mac and vm214. All 20 packages it shares with `runtime.lock` have the same pinned versions.
-- **Resolver:** uv 0.13.10, `uv pip compile --universal --python-version 3.14 --generate-hashes --exclude-newer 2026-11-25T00:00:00Z`.
-- **Python:** CPython 3.14.10, uv-managed.
+**Why the runtime lock contains Dask.** The updater opens the store and the NOAA daily files through xarray with Dask chunks, so `dask[array]` is a runtime dependency. The **API does not use Dask** for queries: it reads the store with `chunks=None` and does not connect to the shared Dask scheduler. `distributed` is **not** in the runtime lock; it is only in `dev.lock` for tests. The launchers also clear the old scheduler settings (`DASK_SCHEDULER_ADDRESS` and the three `DASK_TLS_*` variables).
 
-Install (into a new uv venv only; never into a shared Python):
+**polars.** The extra is `polars[rtcompat]`, which installs the `compat` runtime. The launchers set `POLARS_FORCE_PKG=compat`: the production CPU lacks AVX2, and this setting makes a missing compat runtime fail at import instead of falling back to a build that needs AVX2.
+
+## Python and uv
+
+- **Python:** CPython 3.14.10, uv-managed (`uv python install 3.14.10`).
+- **Locks:** generated with uv 0.13.10, as universal locks with hashes, and resolved against the package index as of 2026-11-25:
+
+  ```bash
+  uv pip compile --universal --python-version 3.14 --generate-hashes --exclude-newer 2026-11-25T00:00:00Z runtime.in -o runtime.lock
+  ```
+
+  The header of `runtime.lock` names `prod-B.in` / `prod-B.lock`. The file was validated under that name before it was copied here unchanged.
+- **Changing a lock.** Edit the `.in` file, recompile with the command above (new `--exclude-newer` date), and update `SHA256SUMS`. Then rerun the full test suite and the production acceptance checks before deploying. `tests/test_p1_2_launch_config.py` checks the sums and that the shared pins agree.
+
+## Install
+
+Always into a **new** venv; never into a shared or system Python.
+
+Verify the files first:
+
+```bash
+cd API/requirements/p1-2
+sha256sum -c SHA256SUMS        # macOS: shasum -a 256 -c SHA256SUMS
+```
+
+Production (API and updater); `MHW_VENV` must match `conf/p12_env.sh`:
 
 ```bash
 uv venv --python 3.14.10 "$MHW_VENV"
 uv pip sync --python "$MHW_VENV/bin/python" --require-hashes --no-build runtime.lock
 ```
 
-Launchers: `../../conf/p12_env.sh` (venv path, `POLARS_FORCE_PKG=compat`), `../../conf/start_app.sh` (API), `../../conf/run_update_mhw.sh` (updater).
-Polars: the extra is `rtcompat`; the runtime it loads is `compat`, forced by `POLARS_FORCE_PKG=compat` so a missing compat runtime fails at import instead of falling back to runtime-32.
+Tests (from the `API/` directory: `pytest`, see `pytest.ini`):
+
+```bash
+uv venv --python 3.14.10 .venv-test
+uv pip sync --python .venv-test/bin/python --require-hashes runtime.lock dev.lock
+```
+
+The Phase 1 test venv was built this way with an earlier runtime lock, which lacked only the updater's packages. This combination with the current `runtime.lock` is expected to resolve, because the shared pins agree, but it has not been installed as such.
+
+Benchmark/check runners:
+
+```bash
+uv venv --python 3.14.10 .venv-tools
+uv pip sync --python .venv-tools/bin/python --require-hashes --no-build tools.lock
+```
+
+## How the venv is used
+
+- `../../conf/p12_env.sh`: the venv path (`MHW_VENV`, default `/home/odbadmin/venvs/mhw-p12`; an `MHW_VENV` set in the environment wins) and `POLARS_FORCE_PKG=compat`. It refuses to continue if the venv has no python.
+- `../../conf/start_app.sh`: the API (gunicorn + uvicorn-worker), started by PM2 through `../../conf/ecosystem.config.js`.
+- `../../conf/run_update_mhw.sh`: the monthly updater, called by the host's cron wrapper. The wrapper is not in this repository; see `../../docs/release_v0.3.0_phase1.md`.

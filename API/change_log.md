@@ -47,3 +47,16 @@ ODB API of Marine Heatwaves
     -- connect the MHW API to the shared Dask scheduler with its dedicated mutual-TLS client certificate
     -- map latitudes at or above 90 degrees to the dataset's northernmost grid point (89.875) to avoid empty point selections
     -- restrict the local-development Dask scheduler and worker in simu.sh to loopback, disable the worker dashboard, and fail closed if port 8786 is occupied or cannot be checked
+
+#### ver 0.3.0 (draft, not tagged) Phase 1 core milestone: API performance and runtime environment
+
+    -- read the zarr store directly with numpy-backed arrays (chunks=None) and only the requested variables; the API no longer connects to the shared Dask scheduler (src/dask_client_manager.py is kept as a no-op shim for old imports)
+    -- CSV responses delete their temporary file after sending
+    -- plots read only the plotted variable and draw on matplotlib Figure objects instead of global pyplot state
+    -- heavy requests (plots, and JSON/CSV selections larger than MHW_HEAVY_BYTES, default 2 MiB) run one at a time per worker (MHW_HEAVY_SLOTS, default 1) in their own thread lane, so light queries are not starved; matplotlib drawing is serialised by a lock
+    -- runtime: one uv venv shared by the API and the monthly updater, CPython 3.14.10, hash-locked dependencies in requirements/p1-2/ (zarr 3, xarray 2026.9, pandas 3.1, polars 2.2 with the compat runtime, SQLAlchemy 2.1 with psycopg 3, FastAPI 0.165 / Starlette 1.10, gunicorn 27 with uvicorn-worker)
+    -- launchers: conf/p12_env.sh defines the venv and POLARS_FORCE_PKG=compat; conf/start_app.sh execs gunicorn (no --reload); new conf/run_update_mhw.sh runs update_mhw.py with the same venv; conf/ecosystem.config.js manages only mhwapi (explicit cwd and kill_timeout, pre_stop removed)
+    -- acceptance on production (loopback): the 17 golden data cases are byte-identical; single-point median 0.121 s (about 3.0 s before Phase 1, 0.093 s with the P1-1 code on the old environment); the new environment is about 32 ms slower than the old one, within the provisional limits (median <= 0.3 s, paired difference CI upper bound <= +50 ms), which the owner has not yet formally adopted
+    -- accepted output difference: the CSV Range 416 response now carries Content-Range "bytes */<size>" (Starlette 1.x); plot PNGs are checked by format and size, not by bytes
+    -- not changed: response bodies of the data endpoints, the dateline handling (a query crossing 180 degrees still needs two API calls), update_mhw.py, and the OpenAPI info.version (1.0.0)
+    -- open: the first real monthly update on the new venv (2026-12-18), reboot recovery of the PM2 app, and the P1-3 monthly-update hardening; see docs/release_v0.3.0_phase1.md
