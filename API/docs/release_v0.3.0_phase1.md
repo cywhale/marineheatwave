@@ -1,8 +1,8 @@
-# v0.3.0 (draft): Phase 1 core milestone — API performance and runtime environment
+# v0.3.0: Phase 1 core milestone — API performance and runtime environment
 
-Status: **draft, not tagged.** Date of the summary: 2026-11-26. The changes below have been in production since 2026-11-25; the version number v0.3.0 is planned and not yet released.
+Version: **v0.3.0**. Date of the summary: 2026-11-26. The changes below have been in production since 2026-11-25.
 
-The planned v0.3.0 covers the core of Phase 1 of the MHW improvement roadmap:
+v0.3.0 covers the core of Phase 1 of the MHW improvement roadmap:
 - the API code fixes that keep outputs unchanged (P1-0 and P1-1);
 - the new runtime environment (P1-2).
 
@@ -98,7 +98,7 @@ The wrapper is tested with fakes and one controlled restart, but **the first rea
 
 1. Check the 2026-12-18 monthly update (log `# result:` line, cron mail, new month visible in the API).
 2. Formally adopt or change the latency limits (0.3 s; +50 ms).
-3. Production checkout: it still points at the pre-Phase-1 commit, with the deployed files copied in. Decide on push or tag so that files and HEAD agree. Since this documentation commit, the repo also differs from production in comments of `conf/p12_env.sh`, `conf/run_update_mhw.sh` and `conf/ecosystem.config.js` (comments only).
+3. Production checkout: it still points at the pre-Phase-1 commit, with the deployed files copied in. Decide how to bring it to `v0.3.0` (or a later commit) so that files and HEAD agree. Since this documentation commit, the repo also differs from production in comments of `conf/p12_env.sh`, `conf/run_update_mhw.sh` and `conf/ecosystem.config.js` (comments only).
 4. Cron wrapper in version control: done (owner 2026-11-26), `conf/update_mhw_cron.sh.template` (§5). It was checked locally by `bash -n` and four runs: unfilled, partly filled, and with an existing directory under a `/path/to/` path all stop at the guard with exit 11 and create no files; fully filled, it passes the guard. The guard matches the `/path/to/` text, not whether the path exists. The wrapper's test harness is not in the repository: it was run against the installed r2 on the production host. A change to the template should be re-tested the same way before it is installed. If the production checkout is later updated with git, the removal deletes only its tracked symlink; cron calls the wrapper's absolute path, so it is not affected.
 5. Reboot recovery check (PM2 resurrect with the new app), postponed.
 6. When to retire the pre-Phase-1 Python environment, which the rollback script still uses.
